@@ -1,0 +1,17 @@
+title: "xBxBio | Connected Cardiovascular Intelligence™"
+
+description: "xBxBio advances Connected Cardiovascular Intelligence™ through longitudinal multimodal cardiovascular data, clinical AI, interoperability, provenance, data integrity, and human-centered clinical intelligence."
+
+url: "https://xbxbio.github.io"
+
+baseurl: "/connected-cardiovascular-intelligence"
+
+lang: "en-US"
+
+repository: "xbxbio/connected-cardiovascular-intelligence"
+
+author:
+  name: "xBxBio"
+
+github:
+  is_project_page: true
