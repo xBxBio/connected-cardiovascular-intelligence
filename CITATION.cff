@@ -1,0 +1,37 @@
+cff-version: 1.2.0
+
+message: "If you use or reference this xBxBio repository, please cite the Connected Cardiovascular Intelligence™ framework using the citation metadata below."
+
+title: "Connected Cardiovascular Intelligence™: Public Technical and Educational Repository"
+
+authors:
+  - name: "xBxBio"
+
+abstract: "A public technical and educational repository from xBxBio describing principles and selected non-proprietary resources related to Connected Cardiovascular Intelligence™, including longitudinal and multimodal cardiovascular information, clinical AI, interoperability, provenance, traceability, data integrity, and human oversight."
+
+repository-code: "https://github.com/xbxbio/connected-cardiovascular-intelligence"
+
+url: "https://xbxbio.github.io/connected-cardiovascular-intelligence/"
+
+keywords:
+  - "Connected Cardiovascular Intelligence"
+  - "xBxBio"
+  - "cardiovascular informatics"
+  - "clinical AI"
+  - "multimodal data"
+  - "longitudinal data"
+  - "interoperability"
+  - "FHIR"
+  - "DICOM"
+  - "clinical informatics"
+  - "data provenance"
+  - "data integrity"
+  - "human oversight"
+
+preferred-citation:
+  type: generic
+  authors:
+    - name: "xBxBio"
+  title: "Connected Cardiovascular Intelligence™"
+  year: 2026
+  url: "https://xbxbio.github.io/connected-cardiovascular-intelligence/"
