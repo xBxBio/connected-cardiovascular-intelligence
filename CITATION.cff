@@ -4,6 +4,9 @@ message: "If you use or reference this xBxBio repository, please cite the Connec
 
 title: "Connected Cardiovascular Intelligence™: Public Technical and Educational Repository"
 
+version: 0.1.1
+date-released: 2026-08-28
+
 authors:
   - name: "xBxBio"
 
