@@ -1,6 +1,8 @@
 # xBxBio Connected Cardiovascular Intelligence™
 
-### Advancing the Principles of Connected Cardiovascular Intelligence
+[![DOI](https://zenodo.org/badge/1348653252.svg)](https://doi.org/10.5281/zenodo.22148803)
+
+Advancing the Principles of Connected Cardiovascular Intelligence
 
 **Cardiovascular Informatics • Multimodal Data • Interoperability • Longitudinal Intelligence • Clinical AI • Data Integrity • Governance**
 
