@@ -1,9 +1,8 @@
 ---
-title: "xBxBio | Connected Cardiovascular Intelligence™"
-description: "xBxBio advances Connected Cardiovascular Intelligence™ through longitudinal multimodal cardiovascular data, clinical AI, interoperability, provenance, data integrity, and human-centered clinical intelligence."
-permalink: /
+title: "Connected Cardiovascular Intelligence™"
+description: "xBxBio advances Connected Cardiovascular Intelligence™ through multimodal data, clinical AI, interoperability, provenance, and human oversight."
+permalink: "/"
 ---
-
 # xBxBio Connected Cardiovascular Intelligence™
 
 ## Connecting cardiovascular information across time, systems, and modalities
