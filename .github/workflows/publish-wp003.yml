@@ -1,0 +1,331 @@
+name: Publish XBX-RSP-WP-003
+
+on:
+  schedule:
+    # October 4, 2026 at 18:37 UTC = 2:37 PM EDT (America/New_York).
+    # This is exactly 2.75 weeks after WP-002 is scheduled to go live.
+    # Cron has no year field, so the workflow includes an explicit 2026 date gate.
+    - cron: '37 18 4 10 *'
+
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+
+concurrency:
+  group: publish-xbx-rsp-wp-003
+  cancel-in-progress: false
+
+env:
+  TARGET_DATE: '2026-10-04'
+  STAGING_TAG: 'wp003-staging'
+  DEST_DIR: 'publications/XBX-RSP-WP-003'
+  EXPECTED_HTML_SHA256: '1ce25a0e8bbd7eb1b40bbc25be74cb36fe2f0a3facd3871d539db55b2eb4c6eb'
+  EXPECTED_PDF_SHA256: 'e5fedbfe45f640f0f44b355e500b8b05dfe690e632d6465772410c7119d8bff2'
+
+jobs:
+  stage-check-and-publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Determine whether this run may publish
+        id: gate
+        shell: bash
+        run: |
+          TODAY_UTC="$(date -u +%F)"
+
+          echo "GitHub event: ${GITHUB_EVENT_NAME}"
+          echo "UTC date: ${TODAY_UTC}"
+          echo "Target date: ${TARGET_DATE}"
+
+          # Manual runs are verification-only and can never publish.
+          if [[ "${GITHUB_EVENT_NAME}" == "schedule" && "${TODAY_UTC}" == "${TARGET_DATE}" ]]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "Scheduled publication gate OPEN."
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Publication gate CLOSED. This run will verify staging only."
+          fi
+
+      - name: Verify GitHub Pages configuration
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BUILD_TYPE="$(
+            gh api "/repos/${GITHUB_REPOSITORY}/pages" --jq '.build_type'
+          )"
+
+          SOURCE_BRANCH="$(
+            gh api "/repos/${GITHUB_REPOSITORY}/pages" --jq '.source.branch'
+          )"
+
+          SOURCE_PATH="$(
+            gh api "/repos/${GITHUB_REPOSITORY}/pages" --jq '.source.path'
+          )"
+
+          echo "Pages build type: ${BUILD_TYPE}"
+          echo "Pages source branch: ${SOURCE_BRANCH}"
+          echo "Pages source path: ${SOURCE_PATH}"
+
+          if [[ "${BUILD_TYPE}" != "legacy" || "${SOURCE_BRANCH}" != "main" || "${SOURCE_PATH}" != "/" ]]; then
+            echo "::error::GitHub Pages must remain configured for main / (root) branch deployment."
+            exit 1
+          fi
+
+      - name: Locate draft staging release
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RELEASE_ID="$(
+            gh api --method GET "/repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq ".[] | select(.draft == true and .tag_name == \"${STAGING_TAG}\") | .id" \
+              | head -n 1
+          )"
+
+          if [[ -z "${RELEASE_ID}" ]]; then
+            echo "::error::Draft release with tag ${STAGING_TAG} was not found."
+            exit 1
+          fi
+
+          echo "release_id=${RELEASE_ID}" >> "$GITHUB_OUTPUT"
+          echo "Found staging draft release ID ${RELEASE_ID}."
+
+      - name: Locate required staging assets
+        id: assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RELEASE_ID="${{ steps.release.outputs.release_id }}"
+
+          HTML_ID="$(
+            gh api --method GET "/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100" \
+              --jq '.[] | select(.name == "index.html") | .id' \
+              | head -n 1
+          )"
+
+          PDF_ID="$(
+            gh api --method GET "/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100" \
+              --jq '.[] | select(.name == "XBX-RSP-WP-003.pdf") | .id' \
+              | head -n 1
+          )"
+
+          if [[ -z "${HTML_ID}" ]]; then
+            echo "::error::Required staging asset index.html was not found."
+            exit 1
+          fi
+
+          if [[ -z "${PDF_ID}" ]]; then
+            echo "::error::Required staging asset XBX-RSP-WP-003.pdf was not found."
+            exit 1
+          fi
+
+          echo "html_id=${HTML_ID}" >> "$GITHUB_OUTPUT"
+          echo "pdf_id=${PDF_ID}" >> "$GITHUB_OUTPUT"
+          echo "Both required staging assets were found."
+
+      - name: Download staged files for verification
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /tmp/wp003-stage
+
+          curl --fail --location \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/octet-stream" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/${{ steps.assets.outputs.html_id }}" \
+            --output /tmp/wp003-stage/index.html
+
+          curl --fail --location \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/octet-stream" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/${{ steps.assets.outputs.pdf_id }}" \
+            --output /tmp/wp003-stage/XBX-RSP-WP-003.pdf
+
+          test -s /tmp/wp003-stage/index.html
+          test -s /tmp/wp003-stage/XBX-RSP-WP-003.pdf
+
+      - name: Verify staged-file integrity
+        shell: bash
+        run: |
+          HTML_SHA="$(sha256sum /tmp/wp003-stage/index.html | awk '{print $1}')"
+          PDF_SHA="$(sha256sum /tmp/wp003-stage/XBX-RSP-WP-003.pdf | awk '{print $1}')"
+
+          echo "index.html SHA-256: ${HTML_SHA}"
+          echo "XBX-RSP-WP-003.pdf SHA-256: ${PDF_SHA}"
+
+          if [[ "${HTML_SHA}" != "${EXPECTED_HTML_SHA256}" ]]; then
+            echo "::error::index.html does not match the approved staged file."
+            exit 1
+          fi
+
+          if [[ "${PDF_SHA}" != "${EXPECTED_PDF_SHA256}" ]]; then
+            echo "::error::XBX-RSP-WP-003.pdf does not match the approved staged file."
+            exit 1
+          fi
+
+          echo "Staged-file integrity verified."
+
+      - name: Stop after verification on manual or non-target runs
+        if: steps.gate.outputs.publish != 'true'
+        shell: bash
+        run: |
+          echo "Verification successful."
+          echo "No public files were changed."
+          echo "Scheduled public release remains set for ${TARGET_DATE}."
+
+      - name: Publish WP-003 files into GitHub Pages source
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        run: |
+          mkdir -p "${DEST_DIR}"
+
+          cp /tmp/wp003-stage/index.html "${DEST_DIR}/index.html"
+          cp /tmp/wp003-stage/XBX-RSP-WP-003.pdf "${DEST_DIR}/XBX-RSP-WP-003.pdf"
+
+          echo "Files staged in ${DEST_DIR}."
+
+      - name: Add WP-003 to sitemap
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        run: |
+          python <<'PY'
+          from pathlib import Path
+
+          sitemap = Path("sitemap.xml")
+          publication_url = (
+              "https://xbxbio.github.io/connected-cardiovascular-intelligence/"
+              "publications/XBX-RSP-WP-003/"
+          )
+
+          entry = (
+              "  <url>\n"
+              f"    <loc>{publication_url}</loc>\n"
+              "    <lastmod>2026-10-04</lastmod>\n"
+              "  </url>\n"
+          )
+
+          if sitemap.exists():
+              text = sitemap.read_text(encoding="utf-8")
+
+              if publication_url not in text:
+                  if "</urlset>" not in text:
+                      raise SystemExit("Existing sitemap.xml has no closing </urlset> tag.")
+
+                  text = text.replace("</urlset>", entry + "</urlset>")
+                  sitemap.write_text(text, encoding="utf-8")
+                  print("WP-003 added to existing sitemap.")
+              else:
+                  print("WP-003 is already present in sitemap; no change needed.")
+          else:
+              sitemap.write_text(
+                  '<?xml version="1.0" encoding="UTF-8"?>\n'
+                  '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+                  + entry
+                  + '</urlset>\n',
+                  encoding="utf-8",
+              )
+              print("Created sitemap.xml with WP-003.")
+          PY
+
+      - name: Commit public publication to main
+        id: commit
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add "${DEST_DIR}/index.html"
+          git add "${DEST_DIR}/XBX-RSP-WP-003.pdf"
+          git add sitemap.xml
+
+          if git diff --cached --quiet; then
+            echo "WP-003 is already published; no new commit required."
+          else
+            git commit -m "Publish XBX-RSP-WP-003"
+            git push origin main
+          fi
+
+          PUBLISHED_SHA="$(git rev-parse HEAD)"
+          echo "published_sha=${PUBLISHED_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Published main-branch revision: ${PUBLISHED_SHA}"
+
+      - name: Request GitHub Pages build
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api \
+            --method POST \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/pages/builds"
+
+          echo "GitHub Pages build requested from the latest main-branch revision."
+
+      - name: Wait for GitHub Pages build
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_SHA: ${{ steps.commit.outputs.published_sha }}
+        run: |
+          for attempt in $(seq 1 60); do
+            BUILD_JSON="$(
+              gh api \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "/repos/${GITHUB_REPOSITORY}/pages/builds/latest"
+            )"
+
+            STATUS="$(jq -r '.status' <<< "${BUILD_JSON}")"
+            BUILD_SHA="$(jq -r '.commit' <<< "${BUILD_JSON}")"
+
+            echo "Pages build status (${attempt}/60): ${STATUS}; commit: ${BUILD_SHA}"
+
+            if [[ "${BUILD_SHA}" == "${TARGET_SHA}" && "${STATUS}" == "built" ]]; then
+              echo "GitHub Pages build completed successfully for ${TARGET_SHA}."
+              exit 0
+            fi
+
+            if [[ "${BUILD_SHA}" == "${TARGET_SHA}" && "${STATUS}" == "errored" ]]; then
+              echo "::error::GitHub Pages build failed for ${TARGET_SHA}."
+              exit 1
+            fi
+
+            sleep 10
+          done
+
+          echo "::error::GitHub Pages build for ${TARGET_SHA} did not complete within 10 minutes."
+          exit 1
+
+      - name: Publication summary
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        run: |
+          {
+            echo "## XBX-RSP-WP-003 published"
+            echo
+            echo "**Publication date:** October 4, 2026"
+            echo
+            echo "**Public page:**"
+            echo "https://xbxbio.github.io/connected-cardiovascular-intelligence/publications/XBX-RSP-WP-003/"
+            echo
+            echo "**Public PDF:**"
+            echo "https://xbxbio.github.io/connected-cardiovascular-intelligence/publications/XBX-RSP-WP-003/XBX-RSP-WP-003.pdf"
+            echo
+            echo "Google Scholar indexing is crawler-controlled and is not guaranteed to occur immediately."
+          } >> "$GITHUB_STEP_SUMMARY"
