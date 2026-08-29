@@ -2,13 +2,15 @@ name: Publish XBX-RSP-WP-002
 
 on:
   schedule:
-    # September 15 at 12:37 UTC = 8:37 AM EDT (America/New_York)
+    # September 15, 2026 at 12:37 UTC = 8:37 AM EDT (America/New_York).
     # Cron has no year field, so the workflow includes an explicit 2026 date gate.
     - cron: '37 12 15 9 *'
+
   workflow_dispatch:
 
 permissions:
   contents: write
+  pages: write
 
 concurrency:
   group: publish-xbx-rsp-wp-002
@@ -51,6 +53,32 @@ jobs:
             echo "Publication gate CLOSED. This run will verify staging only."
           fi
 
+      - name: Verify GitHub Pages configuration
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BUILD_TYPE="$(
+            gh api "/repos/${GITHUB_REPOSITORY}/pages" --jq '.build_type'
+          )"
+
+          SOURCE_BRANCH="$(
+            gh api "/repos/${GITHUB_REPOSITORY}/pages" --jq '.source.branch'
+          )"
+
+          SOURCE_PATH="$(
+            gh api "/repos/${GITHUB_REPOSITORY}/pages" --jq '.source.path'
+          )"
+
+          echo "Pages build type: ${BUILD_TYPE}"
+          echo "Pages source branch: ${SOURCE_BRANCH}"
+          echo "Pages source path: ${SOURCE_PATH}"
+
+          if [[ "${BUILD_TYPE}" != "legacy" || "${SOURCE_BRANCH}" != "main" || "${SOURCE_PATH}" != "/" ]]; then
+            echo "::error::GitHub Pages must remain configured for main / (root) branch deployment."
+            exit 1
+          fi
+
       - name: Locate draft staging release
         id: release
         shell: bash
@@ -58,7 +86,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RELEASE_ID="$(
-            gh api --method GET "/repos/${GITHUB_REPOSITORY}/releases?per_page=100"               --jq ".[] | select(.draft == true and .tag_name == \"${STAGING_TAG}\") | .id"               | head -n 1
+            gh api --method GET "/repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq ".[] | select(.draft == true and .tag_name == \"${STAGING_TAG}\") | .id" \
+              | head -n 1
           )"
 
           if [[ -z "${RELEASE_ID}" ]]; then
@@ -78,11 +108,15 @@ jobs:
           RELEASE_ID="${{ steps.release.outputs.release_id }}"
 
           HTML_ID="$(
-            gh api --method GET "/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100"               --jq '.[] | select(.name == "index.html") | .id'               | head -n 1
+            gh api --method GET "/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100" \
+              --jq '.[] | select(.name == "index.html") | .id' \
+              | head -n 1
           )"
 
           PDF_ID="$(
-            gh api --method GET "/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100"               --jq '.[] | select(.name == "XBX-RSP-WP-002.pdf") | .id'               | head -n 1
+            gh api --method GET "/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100" \
+              --jq '.[] | select(.name == "XBX-RSP-WP-002.pdf") | .id' \
+              | head -n 1
           )"
 
           if [[ -z "${HTML_ID}" ]]; then
@@ -106,9 +140,19 @@ jobs:
         run: |
           mkdir -p /tmp/wp002-stage
 
-          curl --fail --location             -H "Authorization: Bearer ${GH_TOKEN}"             -H "Accept: application/octet-stream"             -H "X-GitHub-Api-Version: 2022-11-28"             "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/${{ steps.assets.outputs.html_id }}"             --output /tmp/wp002-stage/index.html
+          curl --fail --location \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/octet-stream" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/${{ steps.assets.outputs.html_id }}" \
+            --output /tmp/wp002-stage/index.html
 
-          curl --fail --location             -H "Authorization: Bearer ${GH_TOKEN}"             -H "Accept: application/octet-stream"             -H "X-GitHub-Api-Version: 2022-11-28"             "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/${{ steps.assets.outputs.pdf_id }}"             --output /tmp/wp002-stage/XBX-RSP-WP-002.pdf
+          curl --fail --location \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/octet-stream" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/${{ steps.assets.outputs.pdf_id }}" \
+            --output /tmp/wp002-stage/XBX-RSP-WP-002.pdf
 
           test -s /tmp/wp002-stage/index.html
           test -s /tmp/wp002-stage/XBX-RSP-WP-002.pdf
@@ -134,7 +178,7 @@ jobs:
 
           echo "Staged-file integrity verified."
 
-      - name: Stop after verification on manual/non-target runs
+      - name: Stop after verification on manual or non-target runs
         if: steps.gate.outputs.publish != 'true'
         shell: bash
         run: |
@@ -175,9 +219,11 @@ jobs:
 
           if sitemap.exists():
               text = sitemap.read_text(encoding="utf-8")
+
               if publication_url not in text:
                   if "</urlset>" not in text:
                       raise SystemExit("Existing sitemap.xml has no closing </urlset> tag.")
+
                   text = text.replace("</urlset>", entry + "</urlset>")
                   sitemap.write_text(text, encoding="utf-8")
                   print("WP-002 added to existing sitemap.")
@@ -187,14 +233,15 @@ jobs:
               sitemap.write_text(
                   '<?xml version="1.0" encoding="UTF-8"?>\n'
                   '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
-                  + entry +
-                  '</urlset>\n',
+                  + entry
+                  + '</urlset>\n',
                   encoding="utf-8",
               )
               print("Created sitemap.xml with WP-002.")
           PY
 
       - name: Commit public publication to main
+        id: commit
         if: steps.gate.outputs.publish == 'true'
         shell: bash
         run: |
@@ -206,12 +253,63 @@ jobs:
           git add sitemap.xml
 
           if git diff --cached --quiet; then
-            echo "WP-002 is already published; no commit required."
-            exit 0
+            echo "WP-002 is already published; no new commit required."
+          else
+            git commit -m "Publish XBX-RSP-WP-002"
+            git push origin main
           fi
 
-          git commit -m "Publish XBX-RSP-WP-002"
-          git push origin main
+          PUBLISHED_SHA="$(git rev-parse HEAD)"
+          echo "published_sha=${PUBLISHED_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Published main-branch revision: ${PUBLISHED_SHA}"
+
+      - name: Request GitHub Pages build
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api \
+            --method POST \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/pages/builds"
+
+          echo "GitHub Pages build requested from the latest main-branch revision."
+
+      - name: Wait for GitHub Pages build
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_SHA: ${{ steps.commit.outputs.published_sha }}
+        run: |
+          for attempt in $(seq 1 60); do
+            BUILD_JSON="$(
+              gh api \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "/repos/${GITHUB_REPOSITORY}/pages/builds/latest"
+            )"
+
+            STATUS="$(jq -r '.status' <<< "${BUILD_JSON}")"
+            BUILD_SHA="$(jq -r '.commit' <<< "${BUILD_JSON}")"
+
+            echo "Pages build status (${attempt}/60): ${STATUS}; commit: ${BUILD_SHA}"
+
+            if [[ "${BUILD_SHA}" == "${TARGET_SHA}" && "${STATUS}" == "built" ]]; then
+              echo "GitHub Pages build completed successfully for ${TARGET_SHA}."
+              exit 0
+            fi
+
+            if [[ "${BUILD_SHA}" == "${TARGET_SHA}" && "${STATUS}" == "errored" ]]; then
+              echo "::error::GitHub Pages build failed for ${TARGET_SHA}."
+              exit 1
+            fi
+
+            sleep 10
+          done
+
+          echo "::error::GitHub Pages build for ${TARGET_SHA} did not complete within 10 minutes."
+          exit 1
 
       - name: Publication summary
         if: steps.gate.outputs.publish == 'true'
