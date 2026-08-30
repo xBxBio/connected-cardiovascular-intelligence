@@ -23,8 +23,8 @@ env:
   PUBLICATION_TIME: '10:03 PM EDT'
   STAGING_TAG: 'wp004-staging'
   DEST_DIR: 'publications/XBX-RSP-WP-004'
-  EXPECTED_HTML_SHA256: '4347dbbe353dc4b4b242eff84ed6d7064cb91ab807bc6cccb90d102c96275ec6'
-  EXPECTED_PDF_SHA256: '41ca0b9c8a007635b3574cd826349f66311e47c0bd65d745cfbcf16f9b20bfdd'
+  EXPECTED_HTML_SHA256: '1ba21d810cf1f83056087944ce9ac304fa575f211a39291b9952b3159839fde2'
+  EXPECTED_PDF_SHA256: '98d2563c8ea4e548f0f9ba7eae826edb7292b653372ad3103761218c9b9b6178'
 
 jobs:
   stage-check-and-publish:
@@ -264,7 +264,7 @@ jobs:
 
           PUBLISHED_SHA="$(git rev-parse HEAD)"
           echo "published_sha=${PUBLISHED_SHA}" >> "$GITHUB_OUTPUT"
-          echo "Published main-branch revision: ${PUBLISHED_SHA}"
+          echo "Published main-branch revision: ${PUBLISHED_SHA}."
 
       - name: Request GitHub Pages build
         if: steps.gate.outputs.publish == 'true'
