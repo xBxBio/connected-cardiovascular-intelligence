@@ -1,4 +1,4 @@
-name: Publish XBX-RSP-WP-005
+name: workflows/publish-wp005.yml
 
 on:
   schedule:
