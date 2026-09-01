@@ -1,0 +1,325 @@
+name: Publish XBX-RSP-WP-006
+
+on:
+  workflow_dispatch:
+  schedule:
+    # December 3, 2026 at 9:00 AM EST = 14:00 UTC
+    - cron: "0 14 3 12 *"
+
+permissions:
+  contents: write
+
+env:
+  STAGING_TAG: wp006-staging
+  TARGET_DATE: 2026-12-03
+  TARGET_UTC: 2026-12-03T14:00:00Z
+  DEST_DIR: publications/XBX-RSP-WP-006
+  EXPECTED_HTML_SHA256: c109cadcd5c929bf431d0f50b8d22f726d1cf9f79c6cc8f7b1a8aa5bf4123f79
+  EXPECTED_PDF_SHA256: 7a6647685dd8ba534772051a3d6abd61ea5f3c3bd9ad0b34f72b6b35709602ad
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine publication mode
+        id: gate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "GitHub event: ${GITHUB_EVENT_NAME}"
+
+          # Manual runs are ALWAYS verification-only.
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Manual run detected."
+            echo "This run is verification-only."
+            echo "WP-006 cannot be published by a manual run."
+            exit 0
+          fi
+
+          current_date="$(date -u +%Y-%m-%d)"
+          now_epoch="$(date -u +%s)"
+          target_epoch="$(date -u -d "${TARGET_UTC}" +%s)"
+
+          # Prevent this annual cron expression from publishing in any
+          # year or date other than the approved 2026 release date.
+          if [[ "${current_date}" != "${TARGET_DATE}" ]]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Current UTC date is ${current_date}."
+            echo "Approved publication date is ${TARGET_DATE}."
+            echo "No publication will occur."
+            exit 0
+          fi
+
+          if (( now_epoch < target_epoch )); then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Scheduled run occurred before the approved publication time."
+            echo "No publication will occur."
+            exit 0
+          fi
+
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+          echo "Approved WP-006 publication gate opened."
+
+      - name: Locate WP-006 draft release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_json="$(
+            gh api --paginate \
+              "repos/${{ github.repository }}/releases?per_page=100" |
+            jq -s \
+              --arg tag "${STAGING_TAG}" \
+              'add | map(select(.draft == true and .tag_name == $tag)) | first'
+          )"
+
+          if [[ -z "$release_json" || "$release_json" == "null" ]]; then
+            echo "::error::WP-006 draft staging release was not found."
+            exit 1
+          fi
+
+          release_id="$(jq -r '.id' <<<"$release_json")"
+
+          if [[ -z "$release_id" || "$release_id" == "null" ]]; then
+            echo "::error::Unable to determine WP-006 draft release ID."
+            exit 1
+          fi
+
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+          echo "WP-006 draft release located."
+          echo "Draft release ID: $release_id"
+
+      - name: Download staged WP-006 assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_json="$(
+            gh api \
+              "repos/${{ github.repository }}/releases/${{ steps.release.outputs.release_id }}"
+          )"
+
+          mkdir -p /tmp/wp006-stage
+
+          for name in index.html XBX-RSP-WP-006.pdf; do
+            id="$(
+              jq -r \
+                --arg n "$name" \
+                '.assets[] | select(.name == $n) | .id' \
+                <<<"$release_json"
+            )"
+
+            if [[ -z "$id" || "$id" == "null" ]]; then
+              echo "::error::Missing required staged asset: $name"
+              exit 1
+            fi
+
+            gh api \
+              -H "Accept: application/octet-stream" \
+              "repos/${{ github.repository }}/releases/assets/$id" \
+              > "/tmp/wp006-stage/$name"
+
+            if [[ ! -s "/tmp/wp006-stage/$name" ]]; then
+              echo "::error::Downloaded staged asset is empty: $name"
+              exit 1
+            fi
+
+            echo "Downloaded staged asset: $name"
+          done
+
+      - name: Verify staged-file integrity
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          html_sha="$(
+            sha256sum /tmp/wp006-stage/index.html |
+            awk '{print $1}'
+          )"
+
+          pdf_sha="$(
+            sha256sum /tmp/wp006-stage/XBX-RSP-WP-006.pdf |
+            awk '{print $1}'
+          )"
+
+          echo "index.html SHA-256: $html_sha"
+          echo "XBX-RSP-WP-006.pdf SHA-256: $pdf_sha"
+
+          if [[ "$html_sha" != "$EXPECTED_HTML_SHA256" ]]; then
+            echo "::error::index.html hash mismatch."
+            echo "Expected: $EXPECTED_HTML_SHA256"
+            echo "Actual:   $html_sha"
+            exit 1
+          fi
+
+          if [[ "$pdf_sha" != "$EXPECTED_PDF_SHA256" ]]; then
+            echo "::error::XBX-RSP-WP-006.pdf hash mismatch."
+            echo "Expected: $EXPECTED_PDF_SHA256"
+            echo "Actual:   $pdf_sha"
+            exit 1
+          fi
+
+          echo "WP-006 staged-file integrity verified."
+
+      - name: Stop after verification on manual or non-target runs
+        if: steps.gate.outputs.publish != 'true'
+        shell: bash
+        run: |
+          echo
+          echo "WP-006 verification successful."
+          echo "No public files were changed."
+          echo "No GitHub release was published."
+          echo "Scheduled release remains:"
+          echo "December 3, 2026 at 9:00 AM EST / 14:00 UTC."
+
+      - name: Publish WP-006 files into GitHub Pages source
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "${DEST_DIR}"
+
+          cp \
+            /tmp/wp006-stage/index.html \
+            "${DEST_DIR}/index.html"
+
+          cp \
+            /tmp/wp006-stage/XBX-RSP-WP-006.pdf \
+            "${DEST_DIR}/XBX-RSP-WP-006.pdf"
+
+          echo "WP-006 files copied into ${DEST_DIR}."
+
+      - name: Add WP-006 to sitemap
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python <<'PY'
+          from pathlib import Path
+
+          sitemap = Path("sitemap.xml")
+
+          publication_url = (
+              "https://xbxbio.github.io/"
+              "connected-cardiovascular-intelligence/"
+              "publications/XBX-RSP-WP-006/"
+          )
+
+          entry = (
+              "  <url>\n"
+              f"    <loc>{publication_url}</loc>\n"
+              "    <lastmod>2026-12-03</lastmod>\n"
+              "  </url>\n"
+          )
+
+          if sitemap.exists():
+              text = sitemap.read_text(encoding="utf-8")
+
+              if publication_url in text:
+                  print("WP-006 already exists in sitemap.")
+              else:
+                  if "</urlset>" not in text:
+                      raise SystemExit(
+                          "Existing sitemap.xml has no closing </urlset> tag."
+                      )
+
+                  text = text.replace(
+                      "</urlset>",
+                      entry + "</urlset>"
+                  )
+
+                  sitemap.write_text(
+                      text,
+                      encoding="utf-8"
+                  )
+
+                  print("WP-006 added to sitemap.")
+          else:
+              sitemap.write_text(
+                  '<?xml version="1.0" encoding="UTF-8"?>\n'
+                  '<urlset '
+                  'xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+                  + entry +
+                  '</urlset>\n',
+                  encoding="utf-8"
+              )
+
+              print("Created sitemap.xml containing WP-006.")
+          PY
+
+      - name: Commit public WP-006 files to main
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add "${DEST_DIR}/index.html"
+          git add "${DEST_DIR}/XBX-RSP-WP-006.pdf"
+          git add sitemap.xml
+
+          if git diff --cached --quiet; then
+            echo "WP-006 public files are already present."
+          else
+            git commit -m "Publish XBX-RSP-WP-006"
+            git push origin main
+          fi
+
+      - name: Publish WP-006 GitHub release
+        if: steps.gate.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          gh api \
+            --method PATCH \
+            "repos/${{ github.repository }}/releases/${{ steps.release.outputs.release_id }}" \
+            -f draft=false \
+            -f prerelease=false \
+            >/dev/null
+
+          echo "WP-006 GitHub release published."
+
+      - name: Publication summary
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        run: |
+          {
+            echo "## XBX-RSP-WP-006 published"
+            echo
+            echo "**Publication date:** December 3, 2026"
+            echo
+            echo "**Publication time:** 9:00 AM EST / 14:00 UTC"
+            echo
+            echo "**Version:** 0.2-P"
+            echo
+            echo "**DOI:** 10.5281/zenodo.22237135"
+            echo
+            echo "**Public page:**"
+            echo "https://xbxbio.github.io/connected-cardiovascular-intelligence/publications/XBX-RSP-WP-006/"
+            echo
+            echo "**Public PDF:**"
+            echo "https://xbxbio.github.io/connected-cardiovascular-intelligence/publications/XBX-RSP-WP-006/XBX-RSP-WP-006.pdf"
+            echo
+            echo "Google Scholar indexing remains crawler-controlled."
+          } >> "$GITHUB_STEP_SUMMARY"
