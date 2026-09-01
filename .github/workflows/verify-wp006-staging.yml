@@ -1,0 +1,100 @@
+name: Verify XBX-RSP-WP-006 staging
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  STAGING_TAG: wp006-staging
+  TARGET_DATE: 2026-12-03
+  EXPECTED_HTML_SHA256: c109cadcd5c929bf431d0f50b8d22f726d1cf9f79c6cc8f7b1a8aa5bf4123f79
+  EXPECTED_PDF_SHA256: 7a6647685dd8ba534772051a3d6abd61ea5f3c3bd9ad0b34f72b6b35709602ad
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Verify draft release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_json="$(
+            gh api --paginate \
+              "repos/${{ github.repository }}/releases?per_page=100" |
+            jq -s \
+              --arg tag "${STAGING_TAG}" \
+              'add | map(select(.draft == true and .tag_name == $tag)) | first'
+          )"
+
+          if [[ -z "$release_json" || "$release_json" == "null" ]]; then
+            echo "::error::WP-006 draft staging release was not found."
+            exit 1
+          fi
+
+          echo "WP-006 draft release located."
+
+          mkdir -p /tmp/wp006-stage
+
+          for name in index.html XBX-RSP-WP-006.pdf; do
+            id="$(
+              jq -r \
+                --arg n "$name" \
+                '.assets[] | select(.name == $n) | .id' \
+                <<<"$release_json"
+            )"
+
+            if [[ -z "$id" || "$id" == "null" ]]; then
+              echo "::error::Missing required asset: $name"
+              exit 1
+            fi
+
+            gh api \
+              -H "Accept: application/octet-stream" \
+              "repos/${{ github.repository }}/releases/assets/$id" \
+              > "/tmp/wp006-stage/$name"
+
+            if [[ ! -s "/tmp/wp006-stage/$name" ]]; then
+              echo "::error::Downloaded asset is empty: $name"
+              exit 1
+            fi
+
+            echo "Downloaded and verified non-empty asset: $name"
+          done
+
+          html_sha="$(
+            sha256sum /tmp/wp006-stage/index.html |
+            awk '{print $1}'
+          )"
+
+          pdf_sha="$(
+            sha256sum /tmp/wp006-stage/XBX-RSP-WP-006.pdf |
+            awk '{print $1}'
+          )"
+
+          echo "index.html SHA-256: $html_sha"
+          echo "XBX-RSP-WP-006.pdf SHA-256: $pdf_sha"
+
+          if [[ "$html_sha" != "$EXPECTED_HTML_SHA256" ]]; then
+            echo "::error::index.html hash mismatch."
+            echo "Expected: $EXPECTED_HTML_SHA256"
+            echo "Actual:   $html_sha"
+            exit 1
+          fi
+
+          if [[ "$pdf_sha" != "$EXPECTED_PDF_SHA256" ]]; then
+            echo "::error::XBX-RSP-WP-006.pdf hash mismatch."
+            echo "Expected: $EXPECTED_PDF_SHA256"
+            echo "Actual:   $pdf_sha"
+            exit 1
+          fi
+
+          echo
+          echo "WP-006 staging verified successfully."
+          echo "Target publication date: $TARGET_DATE"
+          echo "No public files were changed."
