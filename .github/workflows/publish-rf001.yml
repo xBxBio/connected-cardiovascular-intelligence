@@ -30,7 +30,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -55,7 +55,8 @@ jobs:
           now_epoch="$(date -u +%s)"
           target_epoch="$(date -u -d "${TARGET_UTC}" +%s)"
 
-          # Prevent the recurring cron from publishing in another year.
+          # Prevent the recurring cron expression from publishing
+          # in another year or on another date.
           if [[ "${current_date}" != "${TARGET_DATE}" ]]; then
             echo "publish=false" >> "$GITHUB_OUTPUT"
             echo "Current UTC date is ${current_date}."
@@ -329,7 +330,9 @@ jobs:
 
               <p>
                 Official Website:
-                <a href="https://xbxbio.com">https://xbxbio.com</a>
+                <a href="https://xbxbio.com">
+                  https://xbxbio.com
+                </a>
               </p>
 
               <p>
@@ -350,6 +353,8 @@ jobs:
           </body>
           </html>
           EOF
+
+          echo "RF-001 public landing page created."
 
       - name: Add RF-001 to sitemap
         if: steps.gate.outputs.publish == 'true'
@@ -378,7 +383,9 @@ jobs:
           if sitemap.exists():
               text = sitemap.read_text(encoding="utf-8")
 
-              if publication_url not in text:
+              if publication_url in text:
+                  print("RF-001 already exists in sitemap.")
+              else:
                   if "</urlset>" not in text:
                       raise SystemExit(
                           "Existing sitemap.xml has no closing </urlset> tag."
@@ -394,6 +401,8 @@ jobs:
                       encoding="utf-8"
                   )
 
+                  print("RF-001 added to sitemap.")
+
           else:
               sitemap.write_text(
                   '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -402,6 +411,8 @@ jobs:
                   '</urlset>\n',
                   encoding="utf-8"
               )
+
+              print("Created sitemap.xml containing RF-001.")
           PY
 
       - name: Commit public RF-001 files to main
@@ -450,12 +461,20 @@ jobs:
           {
             echo "## XBX-RSP-RF-001 published"
             echo
+            echo "**Document:** xBxBio Regulatory-by-Design Framework for Connected Cardiovascular Intelligence"
+            echo
             echo "**Publication date:** September 17, 2026"
+            echo
+            echo "**Publication time:** 9:00 AM EDT / 13:00 UTC"
+            echo
             echo "**Version:** 1.0"
+            echo
             echo "**DOI:** 10.5281/zenodo.22257444"
             echo
             echo "**Public page:**"
             echo "https://xbxbio.github.io/connected-cardiovascular-intelligence/publications/XBX-RSP-RF-001/"
+            echo
+            echo "**GitHub release tag:** XBX-RSP-RF-001-v1.0"
             echo
             echo "RF-001 publication completed."
           } >> "$GITHUB_STEP_SUMMARY"
