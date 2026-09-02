@@ -1,0 +1,461 @@
+name: Publish XBX-RSP-RF-001
+
+on:
+  workflow_dispatch:
+  schedule:
+    # September 17, 2026 at 9:00 AM EDT = 13:00 UTC
+    - cron: "0 13 17 9 *"
+
+permissions:
+  contents: write
+
+env:
+  STAGING_TAG: "XBX-RSP-RF-001-v1.0"
+  TARGET_DATE: "2026-09-17"
+  TARGET_UTC: "2026-09-17T13:00:00Z"
+
+  DEST_DIR: "publications/XBX-RSP-RF-001"
+
+  PDF_NAME: "XBX-RSP-RF-001_xBxBio_Regulatory-by-Design_Framework_Public_Governance_Summary_v1.0.pdf"
+  DOCX_NAME: "XBX-RSP-RF-001_xBxBio_Regulatory-by-Design_Framework_Public_Governance_Summary_v1.0.docx"
+
+  EXPECTED_PDF_SHA256: "8fc11e7a49b6ac9cd3fa82287a0a6847031deb720ae15e74d12912520635ce73"
+  EXPECTED_DOCX_SHA256: "76955034fa3133c41e26c7d232ed989f015482f43d927d2cfda1cb7be219fd07"
+
+  EXPECTED_RELEASE_TITLE: "XBX-RSP-RF-001 — xBxBio Regulatory-by-Design Framework for Connected Cardiovascular Intelligence"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine publication mode
+        id: gate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "GitHub event: ${GITHUB_EVENT_NAME}"
+
+          # Manual runs are verification-only.
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Manual run detected."
+            echo "This run is verification-only."
+            echo "RF-001 will not be published."
+            exit 0
+          fi
+
+          current_date="$(date -u +%Y-%m-%d)"
+          now_epoch="$(date -u +%s)"
+          target_epoch="$(date -u -d "${TARGET_UTC}" +%s)"
+
+          # Prevent the recurring cron from publishing in another year.
+          if [[ "${current_date}" != "${TARGET_DATE}" ]]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Current UTC date is ${current_date}."
+            echo "Approved publication date is ${TARGET_DATE}."
+            echo "No publication will occur."
+            exit 0
+          fi
+
+          if (( now_epoch < target_epoch )); then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Run occurred before the approved publication time."
+            echo "No publication will occur."
+            exit 0
+          fi
+
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+          echo "Approved RF-001 publication gate opened."
+
+      - name: Locate RF-001 draft release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_json="$(
+            gh api --paginate \
+              "repos/${{ github.repository }}/releases?per_page=100" |
+            jq -s \
+              --arg tag "${STAGING_TAG}" \
+              'add | map(select(.draft == true and .tag_name == $tag)) | first'
+          )"
+
+          if [[ -z "$release_json" || "$release_json" == "null" ]]; then
+            echo "::error::RF-001 draft staging release was not found."
+            exit 1
+          fi
+
+          release_id="$(jq -r '.id' <<<"$release_json")"
+          release_title="$(jq -r '.name // ""' <<<"$release_json")"
+
+          if [[ -z "$release_id" || "$release_id" == "null" ]]; then
+            echo "::error::Unable to determine RF-001 draft release ID."
+            exit 1
+          fi
+
+          if [[ "$release_title" != "$EXPECTED_RELEASE_TITLE" ]]; then
+            echo "::error::RF-001 release title mismatch."
+            echo "Expected: $EXPECTED_RELEASE_TITLE"
+            echo "Actual:   $release_title"
+            exit 1
+          fi
+
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+
+          echo "RF-001 draft release located."
+          echo "Draft release ID: $release_id"
+
+      - name: Verify RF-001 release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_json="$(
+            gh api \
+              "repos/${{ github.repository }}/releases/${{ steps.release.outputs.release_id }}"
+          )"
+
+          release_body="$(jq -r '.body // ""' <<<"$release_json")"
+
+          for required_text in \
+            "September 17, 2026" \
+            "10.5281/zenodo.22257444" \
+            "This draft release is a staging mechanism only"; do
+
+            if ! grep -Fq "$required_text" <<<"$release_body"; then
+              echo "::error::Release notes are missing required text: $required_text"
+              exit 1
+            fi
+          done
+
+          echo "RF-001 release notes verified."
+
+      - name: Download staged RF-001 assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_json="$(
+            gh api \
+              "repos/${{ github.repository }}/releases/${{ steps.release.outputs.release_id }}"
+          )"
+
+          asset_count="$(jq -r '.assets | length' <<<"$release_json")"
+
+          if [[ "$asset_count" -ne 2 ]]; then
+            echo "::error::Expected exactly 2 RF-001 assets; found $asset_count."
+            exit 1
+          fi
+
+          mkdir -p /tmp/rf001-stage
+
+          for name in "$PDF_NAME" "$DOCX_NAME"; do
+
+            id="$(
+              jq -r \
+                --arg n "$name" \
+                '.assets[] | select(.name == $n) | .id' \
+                <<<"$release_json"
+            )"
+
+            if [[ -z "$id" || "$id" == "null" ]]; then
+              echo "::error::Missing required staged asset: $name"
+              exit 1
+            fi
+
+            gh api \
+              -H "Accept: application/octet-stream" \
+              "repos/${{ github.repository }}/releases/assets/$id" \
+              > "/tmp/rf001-stage/$name"
+
+            if [[ ! -s "/tmp/rf001-stage/$name" ]]; then
+              echo "::error::Downloaded staged asset is empty: $name"
+              exit 1
+            fi
+
+            echo "Downloaded staged asset: $name"
+          done
+
+      - name: Verify staged-file integrity
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$(head -c 5 "/tmp/rf001-stage/$PDF_NAME")" != "%PDF-" ]]; then
+            echo "::error::PDF signature check failed."
+            exit 1
+          fi
+
+          if ! unzip -t "/tmp/rf001-stage/$DOCX_NAME" >/dev/null; then
+            echo "::error::DOCX package integrity check failed."
+            exit 1
+          fi
+
+          pdf_sha="$(
+            sha256sum "/tmp/rf001-stage/$PDF_NAME" |
+            awk '{print $1}'
+          )"
+
+          docx_sha="$(
+            sha256sum "/tmp/rf001-stage/$DOCX_NAME" |
+            awk '{print $1}'
+          )"
+
+          echo "$PDF_NAME SHA-256: $pdf_sha"
+          echo "$DOCX_NAME SHA-256: $docx_sha"
+
+          if [[ "$pdf_sha" != "$EXPECTED_PDF_SHA256" ]]; then
+            echo "::error::RF-001 PDF hash mismatch."
+            echo "Expected: $EXPECTED_PDF_SHA256"
+            echo "Actual:   $pdf_sha"
+            exit 1
+          fi
+
+          if [[ "$docx_sha" != "$EXPECTED_DOCX_SHA256" ]]; then
+            echo "::error::RF-001 DOCX hash mismatch."
+            echo "Expected: $EXPECTED_DOCX_SHA256"
+            echo "Actual:   $docx_sha"
+            exit 1
+          fi
+
+          echo "RF-001 staged-file integrity verified."
+
+      - name: Stop after verification on manual or non-target runs
+        if: steps.gate.outputs.publish != 'true'
+        shell: bash
+        run: |
+          echo
+          echo "RF-001 verification successful."
+          echo "No public files were changed."
+          echo "No GitHub release was published."
+          echo "Scheduled release remains:"
+          echo "September 17, 2026 at 9:00 AM EDT / 13:00 UTC."
+
+      - name: Publish RF-001 files into GitHub Pages source
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "${DEST_DIR}"
+
+          cp \
+            "/tmp/rf001-stage/$PDF_NAME" \
+            "${DEST_DIR}/$PDF_NAME"
+
+          cp \
+            "/tmp/rf001-stage/$DOCX_NAME" \
+            "${DEST_DIR}/$DOCX_NAME"
+
+          echo "RF-001 files copied into ${DEST_DIR}."
+
+      - name: Create RF-001 public landing page
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > "${DEST_DIR}/index.html" <<EOF
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>xBxBio Regulatory-by-Design Framework for Connected Cardiovascular Intelligence</title>
+            <meta name="description" content="Public Governance Summary Following Internal Review and Approval">
+          </head>
+          <body>
+            <main>
+              <p>xBxBio | Connected Cardiovascular Intelligence™</p>
+
+              <h1>xBxBio Regulatory-by-Design Framework for Connected Cardiovascular Intelligence</h1>
+
+              <p><strong>XBX-RSP-RF-001</strong></p>
+
+              <p>
+                Public Governance Summary Following Internal Review and Approval
+              </p>
+
+              <p>
+                Published September 17, 2026 | Version 1.0
+              </p>
+
+              <p>
+                xBxBio has completed the internal review and approval of its
+                Regulatory-by-Design Framework for Connected Cardiovascular
+                Intelligence. xBxBio is advancing from framework definition
+                into controlled implementation and validation readiness.
+              </p>
+
+              <p>
+                This represents an internal xBxBio governance milestone.
+                It does not constitute FDA clearance, FDA approval,
+                regulatory authorization, certification, conformity assessment,
+                or external endorsement.
+              </p>
+
+              <h2>Files</h2>
+
+              <p>
+                <a href="${PDF_NAME}">View or download the PDF</a>
+              </p>
+
+              <p>
+                <a href="${DOCX_NAME}">Download the Word document</a>
+              </p>
+
+              <h2>Persistent identifier</h2>
+
+              <p>
+                DOI:
+                <a href="https://doi.org/10.5281/zenodo.22257444">
+                  10.5281/zenodo.22257444
+                </a>
+              </p>
+
+              <p>
+                Official Website:
+                <a href="https://xbxbio.com">https://xbxbio.com</a>
+              </p>
+
+              <p>
+                LinkedIn:
+                <a href="https://www.linkedin.com/company/xbx-bio/">
+                  https://www.linkedin.com/company/xbx-bio/
+                </a>
+              </p>
+
+              <p>
+                © 2026 xBxBio. All rights reserved.
+              </p>
+
+              <p>
+                Not for clinical use.
+              </p>
+            </main>
+          </body>
+          </html>
+          EOF
+
+      - name: Add RF-001 to sitemap
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python <<'PY'
+          from pathlib import Path
+
+          sitemap = Path("sitemap.xml")
+
+          publication_url = (
+              "https://xbxbio.github.io/"
+              "connected-cardiovascular-intelligence/"
+              "publications/XBX-RSP-RF-001/"
+          )
+
+          entry = (
+              "  <url>\n"
+              f"    <loc>{publication_url}</loc>\n"
+              "    <lastmod>2026-09-17</lastmod>\n"
+              "  </url>\n"
+          )
+
+          if sitemap.exists():
+              text = sitemap.read_text(encoding="utf-8")
+
+              if publication_url not in text:
+                  if "</urlset>" not in text:
+                      raise SystemExit(
+                          "Existing sitemap.xml has no closing </urlset> tag."
+                      )
+
+                  text = text.replace(
+                      "</urlset>",
+                      entry + "</urlset>"
+                  )
+
+                  sitemap.write_text(
+                      text,
+                      encoding="utf-8"
+                  )
+
+          else:
+              sitemap.write_text(
+                  '<?xml version="1.0" encoding="UTF-8"?>\n'
+                  '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+                  + entry +
+                  '</urlset>\n',
+                  encoding="utf-8"
+              )
+          PY
+
+      - name: Commit public RF-001 files to main
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add "${DEST_DIR}/index.html"
+          git add "${DEST_DIR}/${PDF_NAME}"
+          git add "${DEST_DIR}/${DOCX_NAME}"
+          git add sitemap.xml
+
+          if git diff --cached --quiet; then
+            echo "RF-001 public files are already present."
+          else
+            git commit -m "Publish XBX-RSP-RF-001"
+            git push origin main
+          fi
+
+      - name: Publish RF-001 GitHub release
+        if: steps.gate.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          gh api \
+            --method PATCH \
+            "repos/${{ github.repository }}/releases/${{ steps.release.outputs.release_id }}" \
+            -f draft=false \
+            -f prerelease=false \
+            >/dev/null
+
+          echo "RF-001 GitHub release published."
+
+      - name: Publication summary
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        run: |
+          {
+            echo "## XBX-RSP-RF-001 published"
+            echo
+            echo "**Publication date:** September 17, 2026"
+            echo "**Version:** 1.0"
+            echo "**DOI:** 10.5281/zenodo.22257444"
+            echo
+            echo "**Public page:**"
+            echo "https://xbxbio.github.io/connected-cardiovascular-intelligence/publications/XBX-RSP-RF-001/"
+            echo
+            echo "RF-001 publication completed."
+          } >> "$GITHUB_STEP_SUMMARY"
