@@ -12,8 +12,9 @@ env:
   EXPECTED_RELEASE_TITLE: "XBX-RSP-RF-001 — xBxBio Regulatory-by-Design Framework for Connected Cardiovascular Intelligence"
   PDF_NAME: "XBX-RSP-RF-001_xBxBio_Regulatory-by-Design_Framework_Public_Governance_Summary_v1.0.pdf"
   DOCX_NAME: "XBX-RSP-RF-001_xBxBio_Regulatory-by-Design_Framework_Public_Governance_Summary_v1.0.docx"
+
   EXPECTED_PDF_SHA256: "8fc11e7a49b6ac9cd3fa82287a0a6847031deb720ae15e74d12912520635ce73"
-  EXPECTED_DOCX_SHA256: "76955034fa3133c41e26c7d232ed989f015482f43d927d2cfda1cb7be219fd07"
+  EXPECTED_DOCX_SHA256: "91e9145b1ed82be46feee9c7e2a158e037dc05d3e5aa08784c32c08334af28fe"
 
 jobs:
   verify:
@@ -26,6 +27,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          echo "Verifying XBX-RSP-RF-001 staging package..."
+          echo "Repository: ${{ github.repository }}"
+          echo "Expected staging tag: ${STAGING_TAG}"
+          echo "Target publication date: ${TARGET_DATE}"
 
           release_json="$(
             gh api --paginate \
@@ -42,6 +48,9 @@ jobs:
 
           release_title="$(jq -r '.name // ""' <<<"$release_json")"
 
+          echo "Draft release found."
+          echo "Release title: $release_title"
+
           if [[ "$release_title" != "$EXPECTED_RELEASE_TITLE" ]]; then
             echo "::error::Release title mismatch."
             echo "Expected: $EXPECTED_RELEASE_TITLE"
@@ -55,11 +64,14 @@ jobs:
             "September 17, 2026" \
             "10.5281/zenodo.22257444" \
             "This draft release is a staging mechanism only"; do
+
             if ! grep -Fq "$required_text" <<<"$release_body"; then
-              echo "::error::Release notes are missing: $required_text"
+              echo "::error::Release notes are missing required text: $required_text"
               exit 1
             fi
           done
+
+          echo "Release notes verified."
 
           asset_count="$(jq -r '.assets | length' <<<"$release_json")"
 
@@ -68,9 +80,12 @@ jobs:
             exit 1
           fi
 
+          echo "Asset count verified: 2"
+
           mkdir -p /tmp/rf001-stage
 
           for name in "$PDF_NAME" "$DOCX_NAME"; do
+
             id="$(
               jq -r \
                 --arg n "$name" \
@@ -83,6 +98,8 @@ jobs:
               exit 1
             fi
 
+            echo "Downloading asset: $name"
+
             gh api \
               -H "Accept: application/octet-stream" \
               "repos/${{ github.repository }}/releases/assets/$id" \
@@ -93,18 +110,26 @@ jobs:
               exit 1
             fi
 
-            echo "Downloaded and verified non-empty asset: $name"
+            echo "Downloaded non-empty asset: $name"
           done
+
+          echo "Checking PDF file signature..."
 
           if [[ "$(head -c 5 "/tmp/rf001-stage/$PDF_NAME")" != "%PDF-" ]]; then
             echo "::error::PDF signature check failed."
             exit 1
           fi
 
+          echo "PDF signature verified."
+
+          echo "Checking DOCX package integrity..."
+
           if ! unzip -t "/tmp/rf001-stage/$DOCX_NAME" >/dev/null; then
             echo "::error::DOCX package integrity check failed."
             exit 1
           fi
+
+          echo "DOCX package integrity verified."
 
           pdf_sha="$(
             sha256sum "/tmp/rf001-stage/$PDF_NAME" |
@@ -116,8 +141,14 @@ jobs:
             awk '{print $1}'
           )"
 
-          echo "$PDF_NAME SHA-256: $pdf_sha"
-          echo "$DOCX_NAME SHA-256: $docx_sha"
+          echo
+          echo "$PDF_NAME SHA-256:"
+          echo "$pdf_sha"
+
+          echo
+          echo "$DOCX_NAME SHA-256:"
+          echo "$docx_sha"
+          echo
 
           if [[ "$pdf_sha" != "$EXPECTED_PDF_SHA256" ]]; then
             echo "::error::PDF hash mismatch."
@@ -126,6 +157,8 @@ jobs:
             exit 1
           fi
 
+          echo "PDF hash verified."
+
           if [[ "$docx_sha" != "$EXPECTED_DOCX_SHA256" ]]; then
             echo "::error::DOCX hash mismatch."
             echo "Expected: $EXPECTED_DOCX_SHA256"
@@ -133,19 +166,42 @@ jobs:
             exit 1
           fi
 
+          echo "DOCX hash verified."
+
           {
             echo "## XBX-RSP-RF-001 staging verified"
+            echo
+            echo "**Document:** xBxBio Regulatory-by-Design Framework for Connected Cardiovascular Intelligence"
+            echo
+            echo "**Document ID:** XBX-RSP-RF-001"
+            echo
+            echo "**Version:** 1.0"
             echo
             echo "**Target publication date:** September 17, 2026"
             echo
             echo "**DOI:** 10.5281/zenodo.22257444"
             echo
-            echo "**Assets verified:** PDF and DOCX"
+            echo "**PDF:** Verified"
             echo
-            echo "No public files were changed. The release remains a draft."
+            echo "**DOCX:** Verified"
+            echo
+            echo "**PDF SHA-256:** \`$pdf_sha\`"
+            echo
+            echo "**DOCX SHA-256:** \`$docx_sha\`"
+            echo
+            echo "No public files were changed."
+            echo
+            echo "The GitHub release remains a draft."
           } >> "$GITHUB_STEP_SUMMARY"
 
           echo
-          echo "RF-001 staging verified successfully."
+          echo "=================================================="
+          echo "RF-001 STAGING VERIFICATION PASSED"
+          echo "=================================================="
+          echo "Document ID: XBX-RSP-RF-001"
+          echo "Version: 1.0"
           echo "Target publication date: $TARGET_DATE"
+          echo "PDF verified."
+          echo "DOCX verified."
           echo "No public files were changed."
+          echo "The release remains a draft."
