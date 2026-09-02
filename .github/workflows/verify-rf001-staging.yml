@@ -10,11 +10,12 @@ env:
   STAGING_TAG: "XBX-RSP-RF-001-v1.0"
   TARGET_DATE: "2026-09-17"
   EXPECTED_RELEASE_TITLE: "XBX-RSP-RF-001 — xBxBio Regulatory-by-Design Framework for Connected Cardiovascular Intelligence"
+
   PDF_NAME: "XBX-RSP-RF-001_xBxBio_Regulatory-by-Design_Framework_Public_Governance_Summary_v1.0.pdf"
   DOCX_NAME: "XBX-RSP-RF-001_xBxBio_Regulatory-by-Design_Framework_Public_Governance_Summary_v1.0.docx"
 
   EXPECTED_PDF_SHA256: "8fc11e7a49b6ac9cd3fa82287a0a6847031deb720ae15e74d12912520635ce73"
-  EXPECTED_DOCX_SHA256: "91e9145b1ed82be46feee9c7e2a158e037dc05d3e5aa08784c32c08334af28fe"
+  EXPECTED_DOCX_SHA256: "76955034fa3133c41e26c7d232ed989f015482f43d927d2cfda1cb7be219fd07"
 
 jobs:
   verify:
