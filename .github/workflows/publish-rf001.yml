@@ -3,11 +3,16 @@ name: Publish XBX-RSP-RF-001
 on:
   workflow_dispatch:
   schedule:
-    # September 17, 2026 at 9:00 AM EDT = 13:00 UTC
+    # September 17, 2026 at 9:00 AM EDT = 13:00 UTC.
     - cron: "0 13 17 9 *"
 
 permissions:
   contents: write
+  pages: write
+
+concurrency:
+  group: publish-xbx-rsp-rf-001
+  cancel-in-progress: false
 
 env:
   STAGING_TAG: "XBX-RSP-RF-001-v1.0"
@@ -20,21 +25,32 @@ env:
 
   EXPECTED_PDF_SHA256: "8fc11e7a49b6ac9cd3fa82287a0a6847031deb720ae15e74d12912520635ce73"
   EXPECTED_DOCX_SHA256: "76955034fa3133c41e26c7d232ed989f015482f43d927d2cfda1cb7be219fd07"
-
   EXPECTED_RELEASE_TITLE: "XBX-RSP-RF-001 — xBxBio Regulatory-by-Design Framework for Connected Cardiovascular Intelligence"
 
+  ZENODO_API_BASE: "https://zenodo.org/api"
   ZENODO_DEPOSITION_ID: "22257444"
   EXPECTED_ZENODO_DOI: "10.5281/zenodo.22257444"
   EXPECTED_ZENODO_TITLE: "xBxBio Regulatory-by-Design Framework for Connected Cardiovascular Intelligence"
+  EXPECTED_ZENODO_PUBLICATION_DATE: "2026-09-17"
+  EXPECTED_ZENODO_VERSION: "1.0"
+  EXPECTED_ZENODO_UPLOAD_TYPE: "publication"
+  EXPECTED_ZENODO_PUBLICATION_TYPE: "report"
+  EXPECTED_ZENODO_ACCESS_RIGHT: "open"
+  EXPECTED_ZENODO_FILE_MD5: "97014e692a03d0efa636071062f05212"
+
+  ZENODO_MAX_ATTEMPTS: "8"
+  ZENODO_RETRY_DELAY_SECONDS: "15"
 
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
+          ref: main
           fetch-depth: 0
 
       - name: Determine publication mode
@@ -45,7 +61,7 @@ jobs:
 
           echo "GitHub event: ${GITHUB_EVENT_NAME}"
 
-          # Manual runs are verification-only.
+          # Manual runs are always verification-only.
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             echo "publish=false" >> "$GITHUB_OUTPUT"
             echo "Manual run detected."
@@ -58,8 +74,8 @@ jobs:
           now_epoch="$(date -u +%s)"
           target_epoch="$(date -u -d "${TARGET_UTC}" +%s)"
 
-          # Prevent the recurring cron expression from publishing
-          # in another year or on another date.
+          # The cron expression recurs annually, so enforce the approved
+          # one-time date and time inside the workflow.
           if [[ "${current_date}" != "${TARGET_DATE}" ]]; then
             echo "publish=false" >> "$GITHUB_OUTPUT"
             echo "Current UTC date is ${current_date}."
@@ -78,7 +94,33 @@ jobs:
           echo "publish=true" >> "$GITHUB_OUTPUT"
           echo "Approved RF-001 publication gate opened."
 
-      - name: Locate RF-001 draft release
+      - name: Verify GitHub Pages configuration
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          pages_json="$(
+            gh api "repos/${{ github.repository }}/pages"
+          )"
+
+          build_type="$(jq -r '.build_type // empty' <<<"$pages_json")"
+          source_branch="$(jq -r '.source.branch // empty' <<<"$pages_json")"
+          source_path="$(jq -r '.source.path // empty' <<<"$pages_json")"
+
+          echo "Pages build type: ${build_type}"
+          echo "Pages source branch: ${source_branch}"
+          echo "Pages source path: ${source_path}"
+
+          if [[ "${build_type}" != "legacy" \
+                || "${source_branch}" != "main" \
+                || "${source_path}" != "/" ]]; then
+            echo "::error::GitHub Pages must remain configured for main / (root) branch deployment."
+            exit 1
+          fi
+
+      - name: Locate RF-001 release
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -91,33 +133,49 @@ jobs:
               "repos/${{ github.repository }}/releases?per_page=100" |
             jq -s \
               --arg tag "${STAGING_TAG}" \
-              'add | map(select(.draft == true and .tag_name == $tag)) | first'
+              'add | map(select(.tag_name == $tag)) | first'
           )"
 
-          if [[ -z "$release_json" || "$release_json" == "null" ]]; then
-            echo "::error::RF-001 draft staging release was not found."
+          if [[ -z "${release_json}" || "${release_json}" == "null" ]]; then
+            echo "::error::RF-001 release with tag ${STAGING_TAG} was not found."
             exit 1
           fi
 
-          release_id="$(jq -r '.id' <<<"$release_json")"
-          release_title="$(jq -r '.name // ""' <<<"$release_json")"
+          release_id="$(jq -r '.id // empty' <<<"$release_json")"
+          release_title="$(jq -r '.name // empty' <<<"$release_json")"
+          release_is_draft="$(jq -r '.draft // false' <<<"$release_json")"
 
-          if [[ -z "$release_id" || "$release_id" == "null" ]]; then
-            echo "::error::Unable to determine RF-001 draft release ID."
+          if [[ -z "${release_id}" ]]; then
+            echo "::error::Unable to determine RF-001 release ID."
             exit 1
           fi
 
-          if [[ "$release_title" != "$EXPECTED_RELEASE_TITLE" ]]; then
+          if [[ "${release_title}" != "${EXPECTED_RELEASE_TITLE}" ]]; then
             echo "::error::RF-001 release title mismatch."
-            echo "Expected: $EXPECTED_RELEASE_TITLE"
-            echo "Actual:   $release_title"
+            echo "Expected: ${EXPECTED_RELEASE_TITLE}"
+            echo "Actual:   ${release_title}"
             exit 1
           fi
 
-          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+          # Before the approved publication time, a manual verification
+          # run must still find the GitHub release in Draft state.
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            now_epoch="$(date -u +%s)"
+            target_epoch="$(date -u -d "${TARGET_UTC}" +%s)"
 
-          echo "RF-001 draft release located."
-          echo "Draft release ID: $release_id"
+            if (( now_epoch < target_epoch )) \
+               && [[ "${release_is_draft}" != "true" ]]; then
+              echo "::error::RF-001 GitHub release is already public before the approved publication time."
+              exit 1
+            fi
+          fi
+
+          echo "release_id=${release_id}" >> "$GITHUB_OUTPUT"
+          echo "is_draft=${release_is_draft}" >> "$GITHUB_OUTPUT"
+
+          echo "RF-001 release located."
+          echo "Release ID: ${release_id}"
+          echo "Draft state: ${release_is_draft}"
 
       - name: Verify RF-001 release notes
         env:
@@ -138,8 +196,8 @@ jobs:
             "10.5281/zenodo.22257444" \
             "This draft release is a staging mechanism only"; do
 
-            if ! grep -Fq "$required_text" <<<"$release_body"; then
-              echo "::error::Release notes are missing required text: $required_text"
+            if ! grep -Fq "${required_text}" <<<"${release_body}"; then
+              echo "::error::Release notes are missing required text: ${required_text}"
               exit 1
             fi
           done
@@ -160,38 +218,38 @@ jobs:
 
           asset_count="$(jq -r '.assets | length' <<<"$release_json")"
 
-          if [[ "$asset_count" -ne 2 ]]; then
-            echo "::error::Expected exactly 2 RF-001 assets; found $asset_count."
+          if [[ "${asset_count}" -ne 2 ]]; then
+            echo "::error::Expected exactly 2 RF-001 assets; found ${asset_count}."
             exit 1
           fi
 
           mkdir -p /tmp/rf001-stage
 
-          for name in "$PDF_NAME" "$DOCX_NAME"; do
+          for name in "${PDF_NAME}" "${DOCX_NAME}"; do
 
-            id="$(
+            asset_id="$(
               jq -r \
-                --arg n "$name" \
-                '.assets[] | select(.name == $n) | .id' \
+                --arg name "${name}" \
+                '.assets[] | select(.name == $name) | .id' \
                 <<<"$release_json"
             )"
 
-            if [[ -z "$id" || "$id" == "null" ]]; then
-              echo "::error::Missing required staged asset: $name"
+            if [[ -z "${asset_id}" || "${asset_id}" == "null" ]]; then
+              echo "::error::Missing required staged asset: ${name}"
               exit 1
             fi
 
             gh api \
               -H "Accept: application/octet-stream" \
-              "repos/${{ github.repository }}/releases/assets/$id" \
-              > "/tmp/rf001-stage/$name"
+              "repos/${{ github.repository }}/releases/assets/${asset_id}" \
+              > "/tmp/rf001-stage/${name}"
 
-            if [[ ! -s "/tmp/rf001-stage/$name" ]]; then
-              echo "::error::Downloaded staged asset is empty: $name"
+            if [[ ! -s "/tmp/rf001-stage/${name}" ]]; then
+              echo "::error::Downloaded staged asset is empty: ${name}"
               exit 1
             fi
 
-            echo "Downloaded staged asset: $name"
+            echo "Downloaded staged asset: ${name}"
           done
 
       - name: Verify staged-file integrity
@@ -199,146 +257,848 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ "$(head -c 5 "/tmp/rf001-stage/$PDF_NAME")" != "%PDF-" ]]; then
+          if [[ "$(head -c 5 "/tmp/rf001-stage/${PDF_NAME}")" != "%PDF-" ]]; then
             echo "::error::PDF signature check failed."
             exit 1
           fi
 
-          if ! unzip -t "/tmp/rf001-stage/$DOCX_NAME" >/dev/null; then
+          if ! unzip -t "/tmp/rf001-stage/${DOCX_NAME}" >/dev/null; then
             echo "::error::DOCX package integrity check failed."
             exit 1
           fi
 
           pdf_sha="$(
-            sha256sum "/tmp/rf001-stage/$PDF_NAME" |
+            sha256sum "/tmp/rf001-stage/${PDF_NAME}" |
             awk '{print $1}'
           )"
 
           docx_sha="$(
-            sha256sum "/tmp/rf001-stage/$DOCX_NAME" |
+            sha256sum "/tmp/rf001-stage/${DOCX_NAME}" |
             awk '{print $1}'
           )"
 
-          echo "$PDF_NAME SHA-256: $pdf_sha"
-          echo "$DOCX_NAME SHA-256: $docx_sha"
+          echo "${PDF_NAME} SHA-256: ${pdf_sha}"
+          echo "${DOCX_NAME} SHA-256: ${docx_sha}"
 
-          if [[ "$pdf_sha" != "$EXPECTED_PDF_SHA256" ]]; then
+          if [[ "${pdf_sha}" != "${EXPECTED_PDF_SHA256}" ]]; then
             echo "::error::RF-001 PDF hash mismatch."
-            echo "Expected: $EXPECTED_PDF_SHA256"
-            echo "Actual:   $pdf_sha"
+            echo "Expected: ${EXPECTED_PDF_SHA256}"
+            echo "Actual:   ${pdf_sha}"
             exit 1
           fi
 
-          if [[ "$docx_sha" != "$EXPECTED_DOCX_SHA256" ]]; then
+          if [[ "${docx_sha}" != "${EXPECTED_DOCX_SHA256}" ]]; then
             echo "::error::RF-001 DOCX hash mismatch."
-            echo "Expected: $EXPECTED_DOCX_SHA256"
-            echo "Actual:   $docx_sha"
+            echo "Expected: ${EXPECTED_DOCX_SHA256}"
+            echo "Actual:   ${docx_sha}"
             exit 1
           fi
 
           echo "RF-001 staged-file integrity verified."
 
+      - name: Create RF-001 Zenodo control helper
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > /tmp/zenodo_rf001.py <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          import socket
+          import sys
+          import time
+          import urllib.error
+          import urllib.request
+          from datetime import datetime, timezone
+          from typing import Any
+
+
+          API_BASE = os.environ.get(
+              "ZENODO_API_BASE",
+              "https://zenodo.org/api",
+          ).rstrip("/")
+
+          TOKEN = os.environ.get("ZENODO_TOKEN", "").strip()
+          DEPOSITION_ID = os.environ["ZENODO_DEPOSITION_ID"].strip()
+
+          EXPECTED_DOI = os.environ["EXPECTED_ZENODO_DOI"].strip()
+          EXPECTED_TITLE = os.environ["EXPECTED_ZENODO_TITLE"].strip()
+          EXPECTED_PUBLICATION_DATE = os.environ[
+              "EXPECTED_ZENODO_PUBLICATION_DATE"
+          ].strip()
+          EXPECTED_VERSION = os.environ["EXPECTED_ZENODO_VERSION"].strip()
+          EXPECTED_UPLOAD_TYPE = os.environ[
+              "EXPECTED_ZENODO_UPLOAD_TYPE"
+          ].strip()
+          EXPECTED_PUBLICATION_TYPE = os.environ[
+              "EXPECTED_ZENODO_PUBLICATION_TYPE"
+          ].strip()
+          EXPECTED_ACCESS_RIGHT = os.environ[
+              "EXPECTED_ZENODO_ACCESS_RIGHT"
+          ].strip()
+          EXPECTED_FILE_MD5 = os.environ[
+              "EXPECTED_ZENODO_FILE_MD5"
+          ].strip().lower()
+
+          MAX_ATTEMPTS = int(os.environ.get("ZENODO_MAX_ATTEMPTS", "8"))
+          RETRY_DELAY_SECONDS = int(
+              os.environ.get("ZENODO_RETRY_DELAY_SECONDS", "15")
+          )
+
+          HEADERS = {
+              "Authorization": f"Bearer {TOKEN}",
+              "Accept": "application/json",
+              "User-Agent": "xBxBio-GitHub-Actions-RF001/1.0",
+          }
+
+
+          def fail(message: str, details: str = "") -> None:
+              print(f"::error::{message}")
+              if details:
+                  print(details[:2000])
+              raise SystemExit(1)
+
+
+          def is_transient(status: int) -> bool:
+              return (
+                  status == 0
+                  or status in {408, 425, 429}
+                  or 500 <= status <= 599
+              )
+
+
+          def request_json(
+              url: str,
+              *,
+              method: str = "GET",
+              timeout: int = 45,
+              authenticated: bool = True,
+          ) -> tuple[int, Any, str]:
+              headers = dict(HEADERS) if authenticated else {
+                  "Accept": "application/json",
+                  "User-Agent": "xBxBio-GitHub-Actions-RF001/1.0",
+              }
+
+              data = None
+              request = urllib.request.Request(
+                  url,
+                  data=data,
+                  headers=headers,
+                  method=method,
+              )
+
+              try:
+                  with urllib.request.urlopen(
+                      request,
+                      timeout=timeout,
+                  ) as response:
+                      raw = response.read()
+                      status = int(response.getcode())
+
+              except urllib.error.HTTPError as error:
+                  status = int(error.code)
+                  raw = error.read()
+
+              except (
+                  urllib.error.URLError,
+                  TimeoutError,
+                  socket.timeout,
+              ) as error:
+                  return 0, None, str(error)
+
+              text = raw.decode("utf-8", errors="replace")
+
+              if not text.strip():
+                  return status, None, ""
+
+              try:
+                  payload = json.loads(text)
+              except json.JSONDecodeError:
+                  payload = None
+
+              return status, payload, text
+
+
+          def extract_items(payload: Any) -> list[dict[str, Any]]:
+              if isinstance(payload, list):
+                  return [
+                      item
+                      for item in payload
+                      if isinstance(item, dict)
+                  ]
+
+              if isinstance(payload, dict):
+                  hits = payload.get("hits")
+
+                  if isinstance(hits, dict):
+                      items = hits.get("hits", [])
+                      if isinstance(items, list):
+                          return [
+                              item
+                              for item in items
+                              if isinstance(item, dict)
+                          ]
+
+              return []
+
+
+          def fetch_files_with_retry() -> list[dict[str, Any]]:
+              url = (
+                  f"{API_BASE}/deposit/depositions/"
+                  f"{DEPOSITION_ID}/files"
+              )
+              last_details = ""
+
+              for attempt in range(1, MAX_ATTEMPTS + 1):
+                  status, payload, text = request_json(url)
+
+                  print(
+                      "Zenodo files request "
+                      f"{attempt}/{MAX_ATTEMPTS}: HTTP {status}"
+                  )
+
+                  if status == 200 and isinstance(payload, list):
+                      return [
+                          item
+                          for item in payload
+                          if isinstance(item, dict)
+                      ]
+
+                  if status in {401, 403, 404}:
+                      fail(
+                          "Zenodo files request returned a permanent error.",
+                          text,
+                      )
+
+                  last_details = text
+
+                  if not is_transient(status):
+                      fail(
+                          f"Unexpected Zenodo files HTTP status: {status}",
+                          text,
+                      )
+
+                  if attempt < MAX_ATTEMPTS:
+                      time.sleep(RETRY_DELAY_SECONDS)
+
+              fail(
+                  "Unable to retrieve RF-001 Zenodo files after retries.",
+                  last_details,
+              )
+              return []
+
+
+          def fetch_deposition_with_retry() -> dict[str, Any]:
+              direct_url = (
+                  f"{API_BASE}/deposit/depositions/{DEPOSITION_ID}"
+              )
+              list_url = (
+                  f"{API_BASE}/deposit/depositions"
+                  "?size=100&all_versions=true&sort=-mostrecent"
+              )
+
+              last_details = ""
+
+              for attempt in range(1, MAX_ATTEMPTS + 1):
+                  direct_status, direct_payload, direct_text = request_json(
+                      direct_url
+                  )
+
+                  print(
+                      "Zenodo direct request "
+                      f"{attempt}/{MAX_ATTEMPTS}: "
+                      f"HTTP {direct_status}"
+                  )
+
+                  if (
+                      direct_status == 200
+                      and isinstance(direct_payload, dict)
+                  ):
+                      return direct_payload
+
+                  if direct_status in {401, 403, 404}:
+                      fail(
+                          "Zenodo direct deposition request returned "
+                          "a permanent error.",
+                          direct_text,
+                      )
+
+                  list_status, list_payload, list_text = request_json(
+                      list_url
+                  )
+
+                  print(
+                      "Zenodo list fallback "
+                      f"{attempt}/{MAX_ATTEMPTS}: "
+                      f"HTTP {list_status}"
+                  )
+
+                  if list_status == 200:
+                      for item in extract_items(list_payload):
+                          if str(item.get("id", "")) == DEPOSITION_ID:
+                              print(
+                                  "RF-001 deposition found through "
+                                  "the list fallback."
+                              )
+                              return item
+
+                  if list_status in {401, 403}:
+                      fail(
+                          "Zenodo list fallback returned an "
+                          "authorization error.",
+                          list_text,
+                      )
+
+                  last_details = (
+                      direct_text
+                      or list_text
+                      or f"Direct HTTP {direct_status}; "
+                         f"list HTTP {list_status}"
+                  )
+
+                  direct_retryable = is_transient(direct_status)
+                  list_retryable = is_transient(list_status)
+
+                  if not direct_retryable and not list_retryable:
+                      fail(
+                          "Zenodo deposition could not be retrieved.",
+                          last_details,
+                      )
+
+                  if attempt < MAX_ATTEMPTS:
+                      wait_seconds = min(
+                          RETRY_DELAY_SECONDS * attempt,
+                          60,
+                      )
+                      print(
+                          "Zenodo is temporarily unavailable. "
+                          f"Retrying in {wait_seconds} seconds."
+                      )
+                      time.sleep(wait_seconds)
+
+              fail(
+                  "Unable to retrieve the RF-001 Zenodo deposition "
+                  "after all retry attempts.",
+                  last_details,
+              )
+              return {}
+
+
+          def first_nonempty(*values: Any) -> str:
+              for value in values:
+                  if isinstance(value, str) and value.strip():
+                      return value.strip()
+              return ""
+
+
+          def normalize_checksum(value: Any) -> str:
+              checksum = str(value or "").strip().lower()
+              if checksum.startswith("md5:"):
+                  checksum = checksum[4:]
+              return checksum
+
+
+          def validate_deposition(
+              record: dict[str, Any],
+          ) -> bool:
+              metadata = record.get("metadata")
+              if not isinstance(metadata, dict):
+                  metadata = {}
+
+              actual_id = str(
+                  record.get("id")
+                  or record.get("record_id")
+                  or ""
+              )
+
+              actual_title = first_nonempty(
+                  metadata.get("title"),
+                  record.get("title"),
+              )
+
+              prereserve = metadata.get("prereserve_doi")
+              if not isinstance(prereserve, dict):
+                  prereserve = {}
+
+              actual_doi = first_nonempty(
+                  record.get("doi"),
+                  prereserve.get("doi"),
+              )
+
+              actual_publication_date = str(
+                  metadata.get("publication_date") or ""
+              )
+              actual_version = str(metadata.get("version") or "")
+              actual_upload_type = str(
+                  metadata.get("upload_type") or ""
+              )
+              actual_publication_type = str(
+                  metadata.get("publication_type") or ""
+              )
+              actual_access_right = str(
+                  metadata.get("access_right") or ""
+              )
+
+              state = str(record.get("state") or "")
+              submitted_raw = record.get("submitted", False)
+              submitted = (
+                  submitted_raw is True
+                  or str(submitted_raw).lower() == "true"
+              )
+
+              files = record.get("files")
+              if not isinstance(files, list) or not files:
+                  files = fetch_files_with_retry()
+
+              print(f"Zenodo deposition ID: {actual_id}")
+              print(f"Zenodo title: {actual_title}")
+              print(f"Zenodo DOI: {actual_doi}")
+              print(
+                  "Zenodo publication date: "
+                  f"{actual_publication_date}"
+              )
+              print(f"Zenodo version: {actual_version}")
+              print(f"Zenodo upload type: {actual_upload_type}")
+              print(
+                  "Zenodo publication type: "
+                  f"{actual_publication_type}"
+              )
+              print(f"Zenodo access right: {actual_access_right}")
+              print(f"Zenodo state: {state}")
+              print(f"Zenodo submitted: {submitted}")
+              print(f"Zenodo file count: {len(files)}")
+
+              if actual_id != DEPOSITION_ID:
+                  fail(
+                      "Zenodo deposition ID mismatch. "
+                      f"Expected {DEPOSITION_ID}; "
+                      f"found {actual_id}."
+                  )
+
+              if actual_title != EXPECTED_TITLE:
+                  fail(
+                      "Zenodo title mismatch. "
+                      f"Expected {EXPECTED_TITLE!r}; "
+                      f"found {actual_title!r}."
+                  )
+
+              if actual_doi != EXPECTED_DOI:
+                  fail(
+                      "Zenodo DOI mismatch. "
+                      f"Expected {EXPECTED_DOI}; "
+                      f"found {actual_doi}."
+                  )
+
+              expected_metadata = {
+                  "publication_date": (
+                      EXPECTED_PUBLICATION_DATE,
+                      actual_publication_date,
+                  ),
+                  "version": (
+                      EXPECTED_VERSION,
+                      actual_version,
+                  ),
+                  "upload_type": (
+                      EXPECTED_UPLOAD_TYPE,
+                      actual_upload_type,
+                  ),
+                  "publication_type": (
+                      EXPECTED_PUBLICATION_TYPE,
+                      actual_publication_type,
+                  ),
+                  "access_right": (
+                      EXPECTED_ACCESS_RIGHT,
+                      actual_access_right,
+                  ),
+              }
+
+              for field, (expected, actual) in expected_metadata.items():
+                  if actual != expected:
+                      fail(
+                          f"Zenodo {field} mismatch. "
+                          f"Expected {expected!r}; "
+                          f"found {actual!r}."
+                      )
+
+              if len(files) != 1:
+                  fail(
+                      "RF-001 Zenodo deposition must contain "
+                      f"exactly one file; found {len(files)}."
+                  )
+
+              zenodo_file = files[0]
+              if not isinstance(zenodo_file, dict):
+                  fail("Zenodo file metadata is not valid.")
+
+              file_name = first_nonempty(
+                  zenodo_file.get("filename"),
+                  zenodo_file.get("key"),
+                  zenodo_file.get("name"),
+              )
+              file_md5 = normalize_checksum(
+                  zenodo_file.get("checksum")
+              )
+
+              print(f"Zenodo file name: {file_name}")
+              print(f"Zenodo file MD5: {file_md5}")
+
+              if (
+                  "XBX-RSP-RF-001" not in file_name
+                  or not file_name.lower().endswith(".pdf")
+              ):
+                  fail(
+                      "Unexpected RF-001 Zenodo filename: "
+                      f"{file_name!r}."
+                  )
+
+              if file_md5 != EXPECTED_FILE_MD5:
+                  fail(
+                      "Zenodo RF-001 PDF checksum mismatch. "
+                      f"Expected {EXPECTED_FILE_MD5}; "
+                      f"found {file_md5}."
+                  )
+
+              published = submitted and state == "done"
+              draft = (
+                  not submitted
+                  and state in {"unsubmitted", "inprogress"}
+              )
+
+              if not published and not draft:
+                  fail(
+                      "Unexpected Zenodo deposition state: "
+                      f"state={state!r}, submitted={submitted!r}."
+                  )
+
+              return published
+
+
+          def public_record_matches() -> bool:
+              url = f"{API_BASE}/records/{DEPOSITION_ID}"
+              status, payload, _ = request_json(
+                  url,
+                  authenticated=False,
+                  timeout=20,
+              )
+
+              print(f"Zenodo public-record check: HTTP {status}")
+
+              if status != 200 or not isinstance(payload, dict):
+                  return False
+
+              metadata = payload.get("metadata")
+              if not isinstance(metadata, dict):
+                  metadata = {}
+
+              title = first_nonempty(
+                  metadata.get("title"),
+                  payload.get("title"),
+              )
+              doi = first_nonempty(
+                  payload.get("doi"),
+                  metadata.get("doi"),
+                  (
+                      payload.get("pids", {})
+                      .get("doi", {})
+                      .get("identifier", "")
+                      if isinstance(payload.get("pids"), dict)
+                      and isinstance(
+                          payload.get("pids", {}).get("doi"),
+                          dict,
+                      )
+                      else ""
+                  ),
+              )
+
+              return doi == EXPECTED_DOI and title == EXPECTED_TITLE
+
+
+          def deposition_reports_published() -> bool:
+              url = (
+                  f"{API_BASE}/deposit/depositions/{DEPOSITION_ID}"
+              )
+              status, payload, _ = request_json(
+                  url,
+                  timeout=30,
+              )
+
+              print(f"Zenodo deposition-state check: HTTP {status}")
+
+              if status != 200 or not isinstance(payload, dict):
+                  return False
+
+              state = str(payload.get("state") or "")
+              submitted_raw = payload.get("submitted", False)
+              submitted = (
+                  submitted_raw is True
+                  or str(submitted_raw).lower() == "true"
+              )
+
+              metadata = payload.get("metadata")
+              if not isinstance(metadata, dict):
+                  metadata = {}
+
+              prereserve = metadata.get("prereserve_doi")
+              if not isinstance(prereserve, dict):
+                  prereserve = {}
+
+              doi = first_nonempty(
+                  payload.get("doi"),
+                  prereserve.get("doi"),
+              )
+
+              return (
+                  state == "done"
+                  and submitted
+                  and doi == EXPECTED_DOI
+              )
+
+
+          def poll_until_published(
+              *,
+              attempts: int,
+              delay_seconds: int,
+          ) -> bool:
+              for attempt in range(1, attempts + 1):
+                  print(
+                      "Zenodo publication verification "
+                      f"{attempt}/{attempts}"
+                  )
+
+                  if public_record_matches():
+                      print(
+                          "Zenodo public record is available "
+                          "with the expected DOI and title."
+                      )
+                      return True
+
+                  if deposition_reports_published():
+                      print(
+                          "Zenodo deposition reports state=done "
+                          "and submitted=true."
+                      )
+                      return True
+
+                  if attempt < attempts:
+                      time.sleep(delay_seconds)
+
+              return False
+
+
+          def preflight() -> None:
+              if not TOKEN:
+                  fail("GitHub secret ZENODO_TOKEN is missing.")
+
+              record = fetch_deposition_with_retry()
+              published = validate_deposition(record)
+
+              # Before the approved publication time, a manual run must
+              # still find the Zenodo record as an unpublished draft.
+              if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
+                  target_text = os.environ["TARGET_UTC"]
+                  target = datetime.fromisoformat(
+                      target_text.replace("Z", "+00:00")
+                  )
+                  now = datetime.now(timezone.utc)
+
+                  if now < target and published:
+                      fail(
+                          "RF-001 Zenodo record is already public "
+                          "before the approved publication time."
+                      )
+
+              output_file = os.environ.get("GITHUB_OUTPUT")
+              if output_file:
+                  with open(
+                      output_file,
+                      "a",
+                      encoding="utf-8",
+                  ) as stream:
+                      stream.write(
+                          "published="
+                          f"{str(published).lower()}\n"
+                      )
+
+              if published:
+                  print(
+                      "RF-001 Zenodo record is already published "
+                      "and matches the approved identity."
+                  )
+              else:
+                  print(
+                      "RF-001 Zenodo draft, files, metadata, DOI, "
+                      "and API credentials verified."
+                  )
+
+
+          def publish() -> None:
+              if not TOKEN:
+                  fail("GitHub secret ZENODO_TOKEN is missing.")
+
+              record = fetch_deposition_with_retry()
+              already_published = validate_deposition(record)
+
+              if already_published:
+                  if poll_until_published(
+                      attempts=3,
+                      delay_seconds=10,
+                  ):
+                      print(
+                          "RF-001 was already published in Zenodo; "
+                          "no duplicate publish request was sent."
+                      )
+                      return
+
+                  fail(
+                      "Zenodo deposition says published, but the "
+                      "published state could not be independently "
+                      "confirmed."
+                  )
+
+              publish_url = (
+                  f"{API_BASE}/deposit/depositions/"
+                  f"{DEPOSITION_ID}/actions/publish"
+              )
+
+              post_attempts = 4
+
+              for attempt in range(1, post_attempts + 1):
+                  status, _, text = request_json(
+                      publish_url,
+                      method="POST",
+                      timeout=90,
+                  )
+
+                  print(
+                      "Zenodo publish request "
+                      f"{attempt}/{post_attempts}: HTTP {status}"
+                  )
+
+                  if status in {401, 403, 404}:
+                      fail(
+                          "Zenodo publish request returned a "
+                          "permanent authorization or record error.",
+                          text,
+                      )
+
+                  if status == 202:
+                      print(
+                          "Zenodo accepted the RF-001 publication "
+                          "request."
+                      )
+
+                      if poll_until_published(
+                          attempts=30,
+                          delay_seconds=10,
+                      ):
+                          print(
+                              "RF-001 Zenodo publication verified."
+                          )
+                          return
+
+                      fail(
+                          "Zenodo accepted publication, but RF-001 "
+                          "was not confirmed as published within "
+                          "the verification window."
+                      )
+
+                  # A proxy timeout can occur after Zenodo accepted
+                  # the POST. Check public/deposition state before
+                  # sending another publish request.
+                  if poll_until_published(
+                      attempts=6,
+                      delay_seconds=10,
+                  ):
+                      print(
+                          "RF-001 Zenodo publication succeeded "
+                          "despite an ambiguous POST response."
+                      )
+                      return
+
+                  if not is_transient(status) and status != 409:
+                      fail(
+                          "Zenodo rejected the RF-001 publish "
+                          f"request with HTTP {status}.",
+                          text,
+                      )
+
+                  if attempt < post_attempts:
+                      wait_seconds = min(
+                          RETRY_DELAY_SECONDS * attempt,
+                          60,
+                      )
+                      print(
+                          "Zenodo remains temporarily unavailable. "
+                          f"Retrying publication in "
+                          f"{wait_seconds} seconds."
+                      )
+                      time.sleep(wait_seconds)
+
+              fail(
+                  "RF-001 Zenodo publication was not confirmed "
+                  "after all retry attempts."
+              )
+
+
+          def main() -> None:
+              if len(sys.argv) != 2:
+                  fail(
+                      "Usage: zenodo_rf001.py "
+                      "<preflight|publish>"
+                  )
+
+              command = sys.argv[1]
+
+              if command == "preflight":
+                  preflight()
+              elif command == "publish":
+                  publish()
+              else:
+                  fail(f"Unknown command: {command}")
+
+
+          if __name__ == "__main__":
+              main()
+          PY
+
+          python3 -m py_compile /tmp/zenodo_rf001.py
+          echo "RF-001 Zenodo helper created and syntax-checked."
+
       - name: Verify RF-001 Zenodo draft and credentials
+        id: zenodo_preflight
         shell: bash
         env:
           ZENODO_TOKEN: ${{ secrets.ZENODO_TOKEN }}
         run: |
           set -euo pipefail
-
-          if [[ -z "${ZENODO_TOKEN:-}" ]]; then
-            echo "::error::GitHub secret ZENODO_TOKEN is missing."
-            exit 1
-          fi
-
-          response_file="$(mktemp)"
-
-          http_status="$(
-            curl \
-              --silent \
-              --show-error \
-              --connect-timeout 30 \
-              --max-time 120 \
-              --output "${response_file}" \
-              --write-out "%{http_code}" \
-              --header "Authorization: Bearer ${ZENODO_TOKEN}" \
-              "https://zenodo.org/api/deposit/depositions/${ZENODO_DEPOSITION_ID}"
-          )"
-
-          echo "Zenodo preflight HTTP status: ${http_status}"
-
-          if [[ "${http_status}" != "200" ]]; then
-            echo "::error::Unable to retrieve the RF-001 Zenodo draft."
-            cat "${response_file}"
-            exit 1
-          fi
-
-          actual_id="$(jq -r '.id // empty | tostring' "${response_file}")"
-          actual_title="$(jq -r '.metadata.title // .title // empty' "${response_file}")"
-          actual_doi="$(
-            jq -r \
-              '.doi // .metadata.prereserve_doi.doi // empty' \
-              "${response_file}"
-          )"
-          actual_state="$(jq -r '.state // empty' "${response_file}")"
-          actual_submitted="$(jq -r '.submitted // false' "${response_file}")"
-
-          echo "Zenodo deposition ID: ${actual_id}"
-          echo "Zenodo title: ${actual_title}"
-          echo "Zenodo DOI: ${actual_doi}"
-          echo "Zenodo state: ${actual_state}"
-          echo "Zenodo submitted: ${actual_submitted}"
-
-          if [[ "${actual_id}" != "${ZENODO_DEPOSITION_ID}" ]]; then
-            echo "::error::Zenodo deposition ID mismatch."
-            echo "Expected: ${ZENODO_DEPOSITION_ID}"
-            echo "Actual:   ${actual_id}"
-            exit 1
-          fi
-
-          if [[ "${actual_title}" != "${EXPECTED_ZENODO_TITLE}" ]]; then
-            echo "::error::Zenodo title mismatch."
-            echo "Expected: ${EXPECTED_ZENODO_TITLE}"
-            echo "Actual:   ${actual_title}"
-            exit 1
-          fi
-
-          if [[ "${actual_doi}" != "${EXPECTED_ZENODO_DOI}" ]]; then
-            echo "::error::Zenodo DOI mismatch."
-            echo "Expected: ${EXPECTED_ZENODO_DOI}"
-            echo "Actual:   ${actual_doi}"
-            exit 1
-          fi
-
-          if [[ "${actual_submitted}" != "false" ]]; then
-            echo "::error::RF-001 Zenodo record is not an unpublished draft."
-            exit 1
-          fi
-
-          if [[ "${actual_state}" != "unsubmitted" ]]; then
-            echo "::error::Unexpected Zenodo draft state: ${actual_state}"
-            exit 1
-          fi
-
-          echo "RF-001 Zenodo draft and API credentials verified."
+          python3 /tmp/zenodo_rf001.py preflight
 
       - name: Stop after verification on manual or non-target runs
         if: steps.gate.outputs.publish != 'true'
         shell: bash
         run: |
-          echo
-          echo "RF-001 verification successful."
-          echo "GitHub staging verified."
-          echo "Zenodo draft verified."
-          echo "ZENODO_TOKEN authentication verified."
-          echo
-          echo "No public files were changed."
-          echo "No GitHub release was published."
-          echo "No Zenodo record was published."
-          echo
-          echo "Scheduled release remains:"
-          echo "September 17, 2026 at 9:00 AM EDT / 13:00 UTC."
+          {
+            echo "## XBX-RSP-RF-001 verification successful"
+            echo
+            echo "**GitHub staging release:** Verified"
+            echo
+            echo "**GitHub staged files and SHA-256 hashes:** Verified"
+            echo
+            echo "**Zenodo deposition ID:** 22257444"
+            echo
+            echo "**Zenodo draft, metadata, file checksum, DOI, and credentials:** Verified"
+            echo
+            echo "**Publication performed:** No"
+            echo
+            echo "RF-001 remains scheduled for September 17, 2026 at 9:00 AM EDT / 13:00 UTC."
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Publish RF-001 files into GitHub Pages source
+          echo "RF-001 verification successful."
+          echo "No GitHub or Zenodo publication occurred."
+
+      - name: Prepare RF-001 files in GitHub Pages source
         if: steps.gate.outputs.publish == 'true'
         shell: bash
         run: |
@@ -347,14 +1107,14 @@ jobs:
           mkdir -p "${DEST_DIR}"
 
           cp \
-            "/tmp/rf001-stage/$PDF_NAME" \
-            "${DEST_DIR}/$PDF_NAME"
+            "/tmp/rf001-stage/${PDF_NAME}" \
+            "${DEST_DIR}/${PDF_NAME}"
 
           cp \
-            "/tmp/rf001-stage/$DOCX_NAME" \
-            "${DEST_DIR}/$DOCX_NAME"
+            "/tmp/rf001-stage/${DOCX_NAME}" \
+            "${DEST_DIR}/${DOCX_NAME}"
 
-          echo "RF-001 files copied into ${DEST_DIR}."
+          echo "RF-001 files prepared in ${DEST_DIR}."
 
       - name: Create RF-001 public landing page
         if: steps.gate.outputs.publish == 'true'
@@ -446,7 +1206,7 @@ jobs:
           </html>
           EOF
 
-          echo "RF-001 public landing page created."
+          echo "RF-001 public landing page prepared."
 
       - name: Add RF-001 to sitemap
         if: steps.gate.outputs.publish == 'true'
@@ -454,7 +1214,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          python <<'PY'
+          python3 <<'PY'
           from pathlib import Path
 
           sitemap = Path("sitemap.xml")
@@ -481,17 +1241,18 @@ jobs:
               else:
                   if "</urlset>" not in text:
                       raise SystemExit(
-                          "Existing sitemap.xml has no closing </urlset> tag."
+                          "Existing sitemap.xml has no closing "
+                          "</urlset> tag."
                       )
 
                   text = text.replace(
                       "</urlset>",
-                      entry + "</urlset>"
+                      entry + "</urlset>",
                   )
 
                   sitemap.write_text(
                       text,
-                      encoding="utf-8"
+                      encoding="utf-8",
                   )
 
                   print("RF-001 added to sitemap.")
@@ -499,16 +1260,27 @@ jobs:
           else:
               sitemap.write_text(
                   '<?xml version="1.0" encoding="UTF-8"?>\n'
-                  '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
-                  + entry +
-                  '</urlset>\n',
-                  encoding="utf-8"
+                  '<urlset xmlns="http://www.sitemaps.org/'
+                  'schemas/sitemap/0.9">\n'
+                  + entry
+                  + '</urlset>\n',
+                  encoding="utf-8",
               )
 
               print("Created sitemap.xml containing RF-001.")
           PY
 
+      - name: Publish and verify RF-001 in Zenodo
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        env:
+          ZENODO_TOKEN: ${{ secrets.ZENODO_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 /tmp/zenodo_rf001.py publish
+
       - name: Commit public RF-001 files to main
+        id: commit
         if: steps.gate.outputs.publish == 'true'
         shell: bash
         run: |
@@ -525,14 +1297,21 @@ jobs:
 
           if git diff --cached --quiet; then
             echo "RF-001 public files are already present."
-
           else
             git commit -m "Publish XBX-RSP-RF-001"
-            git push origin main
+            git fetch origin main
+            git rebase origin/main
+            git push origin HEAD:main
           fi
 
+          published_sha="$(git rev-parse HEAD)"
+          echo "published_sha=${published_sha}" >> "$GITHUB_OUTPUT"
+          echo "Published main-branch revision: ${published_sha}"
+
       - name: Publish RF-001 GitHub release
-        if: steps.gate.outputs.publish == 'true'
+        if: >-
+          steps.gate.outputs.publish == 'true' &&
+          steps.release.outputs.is_draft == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -548,161 +1327,100 @@ jobs:
 
           echo "RF-001 GitHub release published."
 
-      - name: Publish RF-001 Zenodo draft
+      - name: Verify RF-001 GitHub release publication
         if: steps.gate.outputs.publish == 'true'
-        shell: bash
         env:
-          ZENODO_TOKEN: ${{ secrets.ZENODO_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
           set -euo pipefail
 
-          if [[ -z "${ZENODO_TOKEN:-}" ]]; then
-            echo "::error::GitHub secret ZENODO_TOKEN is missing."
-            exit 1
-          fi
-
-          response_file="$(mktemp)"
-
-          echo "Publishing Zenodo deposition ${ZENODO_DEPOSITION_ID}..."
-
-          set +e
-
-          http_status="$(
-            curl \
-              --silent \
-              --show-error \
-              --connect-timeout 30 \
-              --max-time 120 \
-              --output "${response_file}" \
-              --write-out "%{http_code}" \
-              --request POST \
-              --header "Authorization: Bearer ${ZENODO_TOKEN}" \
-              "https://zenodo.org/api/deposit/depositions/${ZENODO_DEPOSITION_ID}/actions/publish"
+          release_json="$(
+            gh api \
+              "repos/${{ github.repository }}/releases/${{ steps.release.outputs.release_id }}"
           )"
 
-          curl_exit=$?
+          is_draft="$(jq -r '.draft // true' <<<"$release_json")"
+          tag_name="$(jq -r '.tag_name // empty' <<<"$release_json")"
 
-          set -e
-
-          echo "Zenodo publish HTTP status: ${http_status}"
-          echo "Zenodo curl exit status: ${curl_exit}"
-
-          if [[ "${curl_exit}" -eq 0 && "${http_status}" == "202" ]]; then
-            echo "Zenodo accepted RF-001 publication."
-
-          else
-            echo "Zenodo publish request did not return a clean 202 response."
-            echo "Checking the deposition before declaring failure."
-
-            check_file="$(mktemp)"
-
-            set +e
-
-            check_status="$(
-              curl \
-                --silent \
-                --show-error \
-                --connect-timeout 30 \
-                --max-time 120 \
-                --output "${check_file}" \
-                --write-out "%{http_code}" \
-                --header "Authorization: Bearer ${ZENODO_TOKEN}" \
-                "https://zenodo.org/api/deposit/depositions/${ZENODO_DEPOSITION_ID}"
-            )"
-
-            check_exit=$?
-
-            set -e
-
-            if [[ "${check_exit}" -eq 0 && "${check_status}" == "200" ]]; then
-              submitted="$(jq -r '.submitted // false' "${check_file}")"
-              state="$(jq -r '.state // empty' "${check_file}")"
-
-              if [[ "${submitted}" == "true" && "${state}" == "done" ]]; then
-                echo "Zenodo publication succeeded despite the ambiguous POST response."
-                exit 0
-              fi
-            fi
-
-            echo "::error::Zenodo RF-001 publication was not confirmed."
-
-            if [[ -s "${response_file}" ]]; then
-              cat "${response_file}"
-            fi
-
+          if [[ "${is_draft}" != "false" ]]; then
+            echo "::error::RF-001 GitHub release is still in Draft state."
             exit 1
           fi
 
-      - name: Verify RF-001 Zenodo publication
+          if [[ "${tag_name}" != "${STAGING_TAG}" ]]; then
+            echo "::error::RF-001 GitHub release tag mismatch after publication."
+            exit 1
+          fi
+
+          echo "RF-001 GitHub release publication verified."
+
+      - name: Request GitHub Pages build
         if: steps.gate.outputs.publish == 'true'
-        shell: bash
         env:
-          ZENODO_TOKEN: ${{ secrets.ZENODO_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
           set -euo pipefail
 
-          verified="false"
+          set +e
+          request_output="$(
+            gh api \
+              --method POST \
+              "repos/${{ github.repository }}/pages/builds" \
+              2>&1
+          )"
+          request_exit=$?
+          set -e
 
-          for attempt in $(seq 1 30); do
+          if [[ "${request_exit}" -eq 0 ]]; then
+            echo "GitHub Pages build requested."
+          else
+            echo "GitHub Pages build request returned a nonzero status."
+            echo "The workflow will inspect the latest build before failing."
+            echo "${request_output}"
+          fi
 
-            response_file="$(mktemp)"
+      - name: Wait for GitHub Pages build
+        if: steps.gate.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ steps.commit.outputs.published_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
 
-            set +e
-
-            http_status="$(
-              curl \
-                --silent \
-                --show-error \
-                --connect-timeout 30 \
-                --max-time 120 \
-                --output "${response_file}" \
-                --write-out "%{http_code}" \
-                --header "Authorization: Bearer ${ZENODO_TOKEN}" \
-                "https://zenodo.org/api/deposit/depositions/${ZENODO_DEPOSITION_ID}"
+          for attempt in $(seq 1 60); do
+            build_json="$(
+              gh api \
+                "repos/${{ github.repository }}/pages/builds/latest"
             )"
 
-            curl_exit=$?
+            status="$(jq -r '.status // empty' <<<"$build_json")"
+            build_sha="$(jq -r '.commit // empty' <<<"$build_json")"
 
-            set -e
+            echo "Pages build ${attempt}/60:"
+            echo "Status: ${status}"
+            echo "Commit: ${build_sha}"
+            echo "Target: ${TARGET_SHA}"
 
-            echo "Zenodo verification attempt ${attempt}/30:"
-            echo "HTTP status: ${http_status}"
-            echo "curl exit status: ${curl_exit}"
+            if [[ "${build_sha}" == "${TARGET_SHA}" \
+                  && "${status}" == "built" ]]; then
+              echo "GitHub Pages build completed successfully."
+              exit 0
+            fi
 
-            if [[ "${curl_exit}" -eq 0 && "${http_status}" == "200" ]]; then
-
-              actual_id="$(jq -r '.id // empty | tostring' "${response_file}")"
-              actual_doi="$(
-                jq -r \
-                  '.doi // .metadata.prereserve_doi.doi // empty' \
-                  "${response_file}"
-              )"
-              actual_state="$(jq -r '.state // empty' "${response_file}")"
-              actual_submitted="$(jq -r '.submitted // false' "${response_file}")"
-
-              echo "Zenodo deposition ID: ${actual_id}"
-              echo "Zenodo DOI: ${actual_doi}"
-              echo "Zenodo state: ${actual_state}"
-              echo "Zenodo submitted: ${actual_submitted}"
-
-              if [[ "${actual_id}" == "${ZENODO_DEPOSITION_ID}" \
-                    && "${actual_doi}" == "${EXPECTED_ZENODO_DOI}" \
-                    && "${actual_state}" == "done" \
-                    && "${actual_submitted}" == "true" ]]; then
-
-                verified="true"
-                echo "RF-001 Zenodo publication verified."
-                break
-              fi
+            if [[ "${build_sha}" == "${TARGET_SHA}" \
+                  && "${status}" == "errored" ]]; then
+              echo "::error::GitHub Pages build failed for ${TARGET_SHA}."
+              exit 1
             fi
 
             sleep 10
           done
 
-          if [[ "${verified}" != "true" ]]; then
-            echo "::error::RF-001 Zenodo publication could not be verified within 5 minutes."
-            exit 1
-          fi
+          echo "::error::GitHub Pages build for ${TARGET_SHA} did not complete within 10 minutes."
+          exit 1
 
       - name: Publication summary
         if: steps.gate.outputs.publish == 'true'
@@ -725,10 +1443,10 @@ jobs:
             echo
             echo "**Zenodo publication:** Verified"
             echo
+            echo "**GitHub release tag:** XBX-RSP-RF-001-v1.0"
+            echo
             echo "**Public page:**"
             echo "https://xbxbio.github.io/connected-cardiovascular-intelligence/publications/XBX-RSP-RF-001/"
             echo
-            echo "**GitHub release tag:** XBX-RSP-RF-001-v1.0"
-            echo
-            echo "RF-001 GitHub and Zenodo publication completed."
+            echo "RF-001 GitHub, GitHub Pages, and Zenodo publication completed."
           } >> "$GITHUB_STEP_SUMMARY"
