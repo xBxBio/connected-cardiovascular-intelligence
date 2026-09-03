@@ -3,8 +3,8 @@ name: Publish XBX-RSP-WP-002
 on:
   schedule:
     # September 15, 2026 at 12:37 UTC = 8:37 AM EDT (America/New_York).
-    # Cron has no year field, so the workflow includes an explicit 2026 date gate.
-    - cron: '37 12 15 9 *'
+    # Cron has no year field, so the workflow enforces the exact 2026 date and time below.
+    - cron: "37 12 15 9 *"
 
   workflow_dispatch:
 
@@ -17,15 +17,37 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  TARGET_DATE: '2026-09-15'
-  STAGING_TAG: 'wp002-staging'
-  DEST_DIR: 'publications/XBX-RSP-WP-002'
-  EXPECTED_HTML_SHA256: 'afcb6b75d366a475595bb5bfa7bc135285f30a60a4949bb1b2bcdc3949493314'
-  EXPECTED_PDF_SHA256: 'f718ccf288bb854e98cae8638aff4adc3efaf4deeb5a8d4601cc2cb6fad9272b'
+  TARGET_DATE: "2026-09-15"
+  TARGET_UTC: "2026-09-15T12:37:00Z"
+  PUBLICATION_TIME: "8:37 AM EDT / 12:37 UTC"
+
+  STAGING_TAG: "wp002-staging"
+  DEST_DIR: "publications/XBX-RSP-WP-002"
+  HTML_NAME: "index.html"
+  PDF_NAME: "XBX-RSP-WP-002.pdf"
+
+  EXPECTED_HTML_SHA256: "afcb6b75d366a475595bb5bfa7bc135285f30a60a4949bb1b2bcdc3949493314"
+  EXPECTED_PDF_SHA256: "f718ccf288bb854e98cae8638aff4adc3efaf4deeb5a8d4601cc2cb6fad9272b"
+
+  ZENODO_API_BASE: "https://zenodo.org/api"
+  ZENODO_DEPOSITION_ID: "22171287"
+  EXPECTED_ZENODO_DOI: "10.5281/zenodo.22171287"
+  EXPECTED_ZENODO_TITLE: "Clinical AI Governance & Defensible Information States"
+  EXPECTED_ZENODO_PUBLICATION_DATE: "2026-09-15"
+  EXPECTED_ZENODO_VERSION: "0.2-P"
+  EXPECTED_ZENODO_UPLOAD_TYPE: "publication"
+  EXPECTED_ZENODO_PUBLICATION_TYPE: "report"
+  EXPECTED_ZENODO_ACCESS_RIGHT: "open"
+  EXPECTED_ZENODO_FILENAME: "XBX-RSP-WP-002 v0.2-P Public Scientific Edition.pdf"
+  EXPECTED_ZENODO_FILE_MD5: "a02ccb73263c05dd8c73a6e4a2b7ff89"
+
+  ZENODO_MAX_ATTEMPTS: "8"
+  ZENODO_RETRY_DELAY_SECONDS: "15"
 
 jobs:
   stage-check-and-publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
 
     steps:
       - name: Check out main
@@ -38,175 +60,1069 @@ jobs:
         id: gate
         shell: bash
         run: |
-          TODAY_UTC="$(date -u +%F)"
+          set -euo pipefail
 
           echo "GitHub event: ${GITHUB_EVENT_NAME}"
-          echo "UTC date: ${TODAY_UTC}"
-          echo "Target date: ${TARGET_DATE}"
 
-          # Manual runs are verification-only and can never publish.
-          if [[ "${GITHUB_EVENT_NAME}" == "schedule" && "${TODAY_UTC}" == "${TARGET_DATE}" ]]; then
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-            echo "Scheduled publication gate OPEN."
-          else
+          # Manual runs are always verification-only.
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             echo "publish=false" >> "$GITHUB_OUTPUT"
-            echo "Publication gate CLOSED. This run will verify staging only."
+            echo "Manual run detected."
+            echo "This run is verification-only."
+            echo "WP-002 will not be published."
+            exit 0
           fi
+
+          current_date="$(date -u +%Y-%m-%d)"
+          now_epoch="$(date -u +%s)"
+          target_epoch="$(date -u -d "${TARGET_UTC}" +%s)"
+
+          echo "Current UTC date: ${current_date}"
+          echo "Approved target date: ${TARGET_DATE}"
+          echo "Approved target time: ${TARGET_UTC}"
+
+          # The cron expression recurs annually. Enforce this one approved date.
+          if [[ "${current_date}" != "${TARGET_DATE}" ]]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "The approved publication date has not been reached."
+            echo "No publication will occur."
+            exit 0
+          fi
+
+          if (( now_epoch < target_epoch )); then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "The workflow started before the approved publication time."
+            echo "No publication will occur."
+            exit 0
+          fi
+
+          if [[ "${GITHUB_EVENT_NAME}" != "schedule" ]]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Only the scheduled event may open the publication gate."
+            echo "No publication will occur."
+            exit 0
+          fi
+
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+          echo "Approved WP-002 publication gate opened."
 
       - name: Verify GitHub Pages configuration
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          BUILD_TYPE="$(
-            gh api "/repos/${GITHUB_REPOSITORY}/pages" --jq '.build_type'
+          set -euo pipefail
+
+          pages_json="$(
+            gh api "repos/${{ github.repository }}/pages"
           )"
 
-          SOURCE_BRANCH="$(
-            gh api "/repos/${GITHUB_REPOSITORY}/pages" --jq '.source.branch'
-          )"
+          build_type="$(jq -r '.build_type // empty' <<<"${pages_json}")"
+          source_branch="$(jq -r '.source.branch // empty' <<<"${pages_json}")"
+          source_path="$(jq -r '.source.path // empty' <<<"${pages_json}")"
 
-          SOURCE_PATH="$(
-            gh api "/repos/${GITHUB_REPOSITORY}/pages" --jq '.source.path'
-          )"
+          echo "Pages build type: ${build_type}"
+          echo "Pages source branch: ${source_branch}"
+          echo "Pages source path: ${source_path}"
 
-          echo "Pages build type: ${BUILD_TYPE}"
-          echo "Pages source branch: ${SOURCE_BRANCH}"
-          echo "Pages source path: ${SOURCE_PATH}"
-
-          if [[ "${BUILD_TYPE}" != "legacy" || "${SOURCE_BRANCH}" != "main" || "${SOURCE_PATH}" != "/" ]]; then
+          if [[ "${build_type}" != "legacy" \
+                || "${source_branch}" != "main" \
+                || "${source_path}" != "/" ]]; then
             echo "::error::GitHub Pages must remain configured for main / (root) branch deployment."
             exit 1
           fi
 
-      - name: Locate draft staging release
+      - name: Locate WP-002 staging release
         id: release
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          RELEASE_ID="$(
-            gh api --method GET "/repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
-              --jq ".[] | select(.draft == true and .tag_name == \"${STAGING_TAG}\") | .id" \
-              | head -n 1
+          set -euo pipefail
+
+          release_json="$(
+            gh api --paginate \
+              "repos/${{ github.repository }}/releases?per_page=100" |
+            jq -s \
+              --arg tag "${STAGING_TAG}" \
+              'add | map(select(.tag_name == $tag)) | first'
           )"
 
-          if [[ -z "${RELEASE_ID}" ]]; then
-            echo "::error::Draft release with tag ${STAGING_TAG} was not found."
+          if [[ -z "${release_json}" || "${release_json}" == "null" ]]; then
+            echo "::error::WP-002 release with tag ${STAGING_TAG} was not found."
             exit 1
           fi
 
-          echo "release_id=${RELEASE_ID}" >> "$GITHUB_OUTPUT"
-          echo "Found staging draft release ID ${RELEASE_ID}."
+          release_id="$(jq -r '.id // empty' <<<"${release_json}")"
+          release_is_draft="$(jq -r '.draft // false' <<<"${release_json}")"
 
-      - name: Locate required staging assets
+          if [[ -z "${release_id}" ]]; then
+            echo "::error::Unable to determine the WP-002 release ID."
+            exit 1
+          fi
+
+          # Before the approved publication time, the staging release must remain private.
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            now_epoch="$(date -u +%s)"
+            target_epoch="$(date -u -d "${TARGET_UTC}" +%s)"
+
+            if (( now_epoch < target_epoch )) \
+               && [[ "${release_is_draft}" != "true" ]]; then
+              echo "::error::WP-002 staging release is already public before the approved publication time."
+              exit 1
+            fi
+          fi
+
+          echo "release_id=${release_id}" >> "$GITHUB_OUTPUT"
+          echo "is_draft=${release_is_draft}" >> "$GITHUB_OUTPUT"
+
+          echo "WP-002 staging release located."
+          echo "Release ID: ${release_id}"
+          echo "Draft state: ${release_is_draft}"
+
+      - name: Locate required WP-002 staging assets
         id: assets
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          RELEASE_ID="${{ steps.release.outputs.release_id }}"
+          set -euo pipefail
 
-          HTML_ID="$(
-            gh api --method GET "/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100" \
-              --jq '.[] | select(.name == "index.html") | .id' \
-              | head -n 1
+          release_json="$(
+            gh api \
+              "repos/${{ github.repository }}/releases/${{ steps.release.outputs.release_id }}"
           )"
 
-          PDF_ID="$(
-            gh api --method GET "/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100" \
-              --jq '.[] | select(.name == "XBX-RSP-WP-002.pdf") | .id' \
-              | head -n 1
+          html_count="$(
+            jq -r \
+              --arg name "${HTML_NAME}" \
+              '[.assets[] | select(.name == $name)] | length' \
+              <<<"${release_json}"
           )"
 
-          if [[ -z "${HTML_ID}" ]]; then
-            echo "::error::Required staging asset index.html was not found."
+          pdf_count="$(
+            jq -r \
+              --arg name "${PDF_NAME}" \
+              '[.assets[] | select(.name == $name)] | length' \
+              <<<"${release_json}"
+          )"
+
+          if [[ "${html_count}" -ne 1 ]]; then
+            echo "::error::Expected exactly one ${HTML_NAME} staging asset; found ${html_count}."
             exit 1
           fi
 
-          if [[ -z "${PDF_ID}" ]]; then
-            echo "::error::Required staging asset XBX-RSP-WP-002.pdf was not found."
+          if [[ "${pdf_count}" -ne 1 ]]; then
+            echo "::error::Expected exactly one ${PDF_NAME} staging asset; found ${pdf_count}."
             exit 1
           fi
 
-          echo "html_id=${HTML_ID}" >> "$GITHUB_OUTPUT"
-          echo "pdf_id=${PDF_ID}" >> "$GITHUB_OUTPUT"
-          echo "Both required staging assets were found."
+          html_id="$(
+            jq -r \
+              --arg name "${HTML_NAME}" \
+              '.assets[] | select(.name == $name) | .id' \
+              <<<"${release_json}"
+          )"
 
-      - name: Download staged files for verification
+          pdf_id="$(
+            jq -r \
+              --arg name "${PDF_NAME}" \
+              '.assets[] | select(.name == $name) | .id' \
+              <<<"${release_json}"
+          )"
+
+          echo "html_id=${html_id}" >> "$GITHUB_OUTPUT"
+          echo "pdf_id=${pdf_id}" >> "$GITHUB_OUTPUT"
+          echo "Both required WP-002 staging assets were found."
+
+      - name: Download staged WP-002 files for verification
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+
           mkdir -p /tmp/wp002-stage
 
-          curl --fail --location \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
+          gh api \
             -H "Accept: application/octet-stream" \
-            -H "X-GitHub-Api-Version: 2026-03-10" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/${{ steps.assets.outputs.html_id }}" \
-            --output /tmp/wp002-stage/index.html
+            "repos/${{ github.repository }}/releases/assets/${{ steps.assets.outputs.html_id }}" \
+            > "/tmp/wp002-stage/${HTML_NAME}"
 
-          curl --fail --location \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
+          gh api \
             -H "Accept: application/octet-stream" \
-            -H "X-GitHub-Api-Version: 2026-03-10" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/${{ steps.assets.outputs.pdf_id }}" \
-            --output /tmp/wp002-stage/XBX-RSP-WP-002.pdf
+            "repos/${{ github.repository }}/releases/assets/${{ steps.assets.outputs.pdf_id }}" \
+            > "/tmp/wp002-stage/${PDF_NAME}"
 
-          test -s /tmp/wp002-stage/index.html
-          test -s /tmp/wp002-stage/XBX-RSP-WP-002.pdf
+          if [[ ! -s "/tmp/wp002-stage/${HTML_NAME}" ]]; then
+            echo "::error::Downloaded ${HTML_NAME} is empty."
+            exit 1
+          fi
 
-      - name: Verify staged-file integrity
+          if [[ ! -s "/tmp/wp002-stage/${PDF_NAME}" ]]; then
+            echo "::error::Downloaded ${PDF_NAME} is empty."
+            exit 1
+          fi
+
+          echo "WP-002 staged files downloaded."
+
+      - name: Verify WP-002 staged-file integrity
         shell: bash
         run: |
-          HTML_SHA="$(sha256sum /tmp/wp002-stage/index.html | awk '{print $1}')"
-          PDF_SHA="$(sha256sum /tmp/wp002-stage/XBX-RSP-WP-002.pdf | awk '{print $1}')"
+          set -euo pipefail
 
-          echo "index.html SHA-256: ${HTML_SHA}"
-          echo "XBX-RSP-WP-002.pdf SHA-256: ${PDF_SHA}"
+          html_sha="$(
+            sha256sum "/tmp/wp002-stage/${HTML_NAME}" |
+            awk '{print $1}'
+          )"
 
-          if [[ "${HTML_SHA}" != "${EXPECTED_HTML_SHA256}" ]]; then
-            echo "::error::index.html does not match the approved staged file."
+          pdf_sha="$(
+            sha256sum "/tmp/wp002-stage/${PDF_NAME}" |
+            awk '{print $1}'
+          )"
+
+          echo "${HTML_NAME} SHA-256: ${html_sha}"
+          echo "${PDF_NAME} SHA-256: ${pdf_sha}"
+
+          if [[ "${html_sha}" != "${EXPECTED_HTML_SHA256}" ]]; then
+            echo "::error::${HTML_NAME} does not match the approved staged file."
+            echo "Expected: ${EXPECTED_HTML_SHA256}"
+            echo "Actual:   ${html_sha}"
             exit 1
           fi
 
-          if [[ "${PDF_SHA}" != "${EXPECTED_PDF_SHA256}" ]]; then
-            echo "::error::XBX-RSP-WP-002.pdf does not match the approved staged file."
+          if [[ "${pdf_sha}" != "${EXPECTED_PDF_SHA256}" ]]; then
+            echo "::error::${PDF_NAME} does not match the approved staged file."
+            echo "Expected: ${EXPECTED_PDF_SHA256}"
+            echo "Actual:   ${pdf_sha}"
             exit 1
           fi
 
-          echo "Staged-file integrity verified."
+          if [[ "$(head -c 5 "/tmp/wp002-stage/${PDF_NAME}")" != "%PDF-" ]]; then
+            echo "::error::${PDF_NAME} failed the PDF signature check."
+            exit 1
+          fi
+
+          echo "WP-002 staged-file integrity verified."
+
+      - name: Create retry-safe WP-002 Zenodo helper
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > /tmp/zenodo_wp002.py <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          import socket
+          import sys
+          import time
+          import urllib.error
+          import urllib.request
+          from datetime import datetime, timezone
+          from typing import Any
+
+
+          API_BASE = os.environ.get(
+              "ZENODO_API_BASE",
+              "https://zenodo.org/api",
+          ).rstrip("/")
+
+          TOKEN = os.environ.get("ZENODO_TOKEN", "").strip()
+          DEPOSITION_ID = os.environ["ZENODO_DEPOSITION_ID"].strip()
+
+          EXPECTED_DOI = os.environ["EXPECTED_ZENODO_DOI"].strip()
+          EXPECTED_TITLE = os.environ["EXPECTED_ZENODO_TITLE"].strip()
+          EXPECTED_PUBLICATION_DATE = os.environ[
+              "EXPECTED_ZENODO_PUBLICATION_DATE"
+          ].strip()
+          EXPECTED_VERSION = os.environ[
+              "EXPECTED_ZENODO_VERSION"
+          ].strip()
+          EXPECTED_UPLOAD_TYPE = os.environ[
+              "EXPECTED_ZENODO_UPLOAD_TYPE"
+          ].strip()
+          EXPECTED_PUBLICATION_TYPE = os.environ[
+              "EXPECTED_ZENODO_PUBLICATION_TYPE"
+          ].strip()
+          EXPECTED_ACCESS_RIGHT = os.environ[
+              "EXPECTED_ZENODO_ACCESS_RIGHT"
+          ].strip()
+          EXPECTED_FILENAME = os.environ[
+              "EXPECTED_ZENODO_FILENAME"
+          ].strip()
+          EXPECTED_FILE_MD5 = os.environ[
+              "EXPECTED_ZENODO_FILE_MD5"
+          ].strip().lower()
+
+          MAX_ATTEMPTS = int(
+              os.environ.get("ZENODO_MAX_ATTEMPTS", "8")
+          )
+          RETRY_DELAY_SECONDS = int(
+              os.environ.get("ZENODO_RETRY_DELAY_SECONDS", "15")
+          )
+
+          AUTH_HEADERS = {
+              "Authorization": f"Bearer {TOKEN}",
+              "Accept": "application/json",
+              "User-Agent": "xBxBio-GitHub-Actions-WP002/1.0",
+          }
+
+          PUBLIC_HEADERS = {
+              "Accept": "application/json",
+              "User-Agent": "xBxBio-GitHub-Actions-WP002/1.0",
+          }
+
+
+          def fail(message: str, details: str = "") -> None:
+              print(f"::error::{message}")
+              if details:
+                  print(details[:2000])
+              raise SystemExit(1)
+
+
+          def normalize_text(value: Any) -> str:
+              return " ".join(str(value or "").split())
+
+
+          def normalize_checksum(value: Any) -> str:
+              checksum = str(value or "").strip().lower()
+              if checksum.startswith("md5:"):
+                  checksum = checksum[4:]
+              return checksum
+
+
+          def first_nonempty(*values: Any) -> str:
+              for value in values:
+                  if isinstance(value, str) and value.strip():
+                      return value.strip()
+              return ""
+
+
+          def is_transient(status: int) -> bool:
+              return (
+                  status == 0
+                  or status in {408, 425, 429}
+                  or 500 <= status <= 599
+              )
+
+
+          def request_json(
+              url: str,
+              *,
+              method: str = "GET",
+              timeout: int = 45,
+              authenticated: bool = True,
+          ) -> tuple[int, Any, str]:
+              headers = AUTH_HEADERS if authenticated else PUBLIC_HEADERS
+
+              request = urllib.request.Request(
+                  url,
+                  data=None,
+                  headers=dict(headers),
+                  method=method,
+              )
+
+              try:
+                  with urllib.request.urlopen(
+                      request,
+                      timeout=timeout,
+                  ) as response:
+                      raw = response.read()
+                      status = int(response.getcode())
+
+              except urllib.error.HTTPError as error:
+                  status = int(error.code)
+                  raw = error.read()
+
+              except (
+                  urllib.error.URLError,
+                  TimeoutError,
+                  socket.timeout,
+              ) as error:
+                  return 0, None, str(error)
+
+              text = raw.decode("utf-8", errors="replace")
+
+              if not text.strip():
+                  return status, None, ""
+
+              try:
+                  payload = json.loads(text)
+              except json.JSONDecodeError:
+                  payload = None
+
+              return status, payload, text
+
+
+          def extract_items(payload: Any) -> list[dict[str, Any]]:
+              if isinstance(payload, list):
+                  return [
+                      item
+                      for item in payload
+                      if isinstance(item, dict)
+                  ]
+
+              if isinstance(payload, dict):
+                  hits = payload.get("hits")
+                  if isinstance(hits, dict):
+                      items = hits.get("hits", [])
+                      if isinstance(items, list):
+                          return [
+                              item
+                              for item in items
+                              if isinstance(item, dict)
+                          ]
+
+              return []
+
+
+          def fetch_files_with_retry() -> list[dict[str, Any]]:
+              url = (
+                  f"{API_BASE}/deposit/depositions/"
+                  f"{DEPOSITION_ID}/files"
+              )
+              last_details = ""
+
+              for attempt in range(1, MAX_ATTEMPTS + 1):
+                  status, payload, text = request_json(url)
+
+                  print(
+                      "Zenodo files request "
+                      f"{attempt}/{MAX_ATTEMPTS}: HTTP {status}"
+                  )
+
+                  if status == 200 and isinstance(payload, list):
+                      return [
+                          item
+                          for item in payload
+                          if isinstance(item, dict)
+                      ]
+
+                  if status in {401, 403, 404}:
+                      fail(
+                          "Zenodo files request returned a permanent error.",
+                          text,
+                      )
+
+                  last_details = text
+
+                  if not is_transient(status):
+                      fail(
+                          f"Unexpected Zenodo files HTTP status: {status}",
+                          text,
+                      )
+
+                  if attempt < MAX_ATTEMPTS:
+                      time.sleep(RETRY_DELAY_SECONDS)
+
+              fail(
+                  "Unable to retrieve WP-002 Zenodo files after retries.",
+                  last_details,
+              )
+              return []
+
+
+          def fetch_deposition_with_retry() -> dict[str, Any]:
+              direct_url = (
+                  f"{API_BASE}/deposit/depositions/{DEPOSITION_ID}"
+              )
+              list_url = (
+                  f"{API_BASE}/deposit/depositions"
+                  "?size=100&all_versions=true&sort=-mostrecent"
+              )
+              last_details = ""
+
+              for attempt in range(1, MAX_ATTEMPTS + 1):
+                  direct_status, direct_payload, direct_text = request_json(
+                      direct_url
+                  )
+
+                  print(
+                      "Zenodo direct request "
+                      f"{attempt}/{MAX_ATTEMPTS}: HTTP {direct_status}"
+                  )
+
+                  if (
+                      direct_status == 200
+                      and isinstance(direct_payload, dict)
+                  ):
+                      return direct_payload
+
+                  if direct_status in {401, 403, 404}:
+                      fail(
+                          "Zenodo direct deposition request returned "
+                          "a permanent error.",
+                          direct_text,
+                      )
+
+                  list_status, list_payload, list_text = request_json(
+                      list_url
+                  )
+
+                  print(
+                      "Zenodo list fallback "
+                      f"{attempt}/{MAX_ATTEMPTS}: HTTP {list_status}"
+                  )
+
+                  if list_status == 200:
+                      for item in extract_items(list_payload):
+                          if str(item.get("id", "")) == DEPOSITION_ID:
+                              print(
+                                  "WP-002 deposition found through "
+                                  "the list fallback."
+                              )
+                              return item
+
+                  if list_status in {401, 403}:
+                      fail(
+                          "Zenodo list fallback returned an "
+                          "authorization error.",
+                          list_text,
+                      )
+
+                  last_details = (
+                      direct_text
+                      or list_text
+                      or f"Direct HTTP {direct_status}; "
+                         f"list HTTP {list_status}"
+                  )
+
+                  if (
+                      not is_transient(direct_status)
+                      and not is_transient(list_status)
+                  ):
+                      fail(
+                          "WP-002 Zenodo deposition could not be retrieved.",
+                          last_details,
+                      )
+
+                  if attempt < MAX_ATTEMPTS:
+                      wait_seconds = min(
+                          RETRY_DELAY_SECONDS * attempt,
+                          60,
+                      )
+                      print(
+                          "Zenodo is temporarily unavailable. "
+                          f"Retrying in {wait_seconds} seconds."
+                      )
+                      time.sleep(wait_seconds)
+
+              fail(
+                  "Unable to retrieve the WP-002 Zenodo deposition "
+                  "after all retry attempts.",
+                  last_details,
+              )
+              return {}
+
+
+          def validate_deposition(record: dict[str, Any]) -> bool:
+              metadata = record.get("metadata")
+              if not isinstance(metadata, dict):
+                  metadata = {}
+
+              actual_id = str(
+                  record.get("id")
+                  or record.get("record_id")
+                  or ""
+              )
+
+              actual_title = normalize_text(
+                  first_nonempty(
+                      metadata.get("title"),
+                      record.get("title"),
+                  )
+              )
+
+              prereserve = metadata.get("prereserve_doi")
+              if not isinstance(prereserve, dict):
+                  prereserve = {}
+
+              actual_doi = first_nonempty(
+                  record.get("doi"),
+                  prereserve.get("doi"),
+              )
+
+              actual_publication_date = str(
+                  metadata.get("publication_date") or ""
+              )
+              actual_version = str(metadata.get("version") or "")
+              actual_upload_type = str(
+                  metadata.get("upload_type") or ""
+              )
+              actual_publication_type = str(
+                  metadata.get("publication_type") or ""
+              )
+              actual_access_right = str(
+                  metadata.get("access_right") or ""
+              )
+
+              state = str(record.get("state") or "")
+              submitted_raw = record.get("submitted", False)
+              submitted = (
+                  submitted_raw is True
+                  or str(submitted_raw).lower() == "true"
+              )
+
+              files = record.get("files")
+              if not isinstance(files, list) or not files:
+                  files = fetch_files_with_retry()
+
+              print(f"Zenodo deposition ID: {actual_id}")
+              print(f"Zenodo title: {actual_title}")
+              print(f"Zenodo DOI: {actual_doi}")
+              print(
+                  "Zenodo publication date: "
+                  f"{actual_publication_date}"
+              )
+              print(f"Zenodo version: {actual_version}")
+              print(f"Zenodo upload type: {actual_upload_type}")
+              print(
+                  "Zenodo publication type: "
+                  f"{actual_publication_type}"
+              )
+              print(f"Zenodo access right: {actual_access_right}")
+              print(f"Zenodo state: {state}")
+              print(f"Zenodo submitted: {submitted}")
+              print(f"Zenodo file count: {len(files)}")
+
+              if actual_id != DEPOSITION_ID:
+                  fail(
+                      "Zenodo deposition ID mismatch. "
+                      f"Expected {DEPOSITION_ID}; found {actual_id}."
+                  )
+
+              if actual_title != normalize_text(EXPECTED_TITLE):
+                  fail(
+                      "Zenodo title mismatch. "
+                      f"Expected {EXPECTED_TITLE!r}; "
+                      f"found {actual_title!r}."
+                  )
+
+              if actual_doi != EXPECTED_DOI:
+                  fail(
+                      "Zenodo DOI mismatch. "
+                      f"Expected {EXPECTED_DOI}; found {actual_doi}."
+                  )
+
+              expected_metadata = {
+                  "publication_date": (
+                      EXPECTED_PUBLICATION_DATE,
+                      actual_publication_date,
+                  ),
+                  "version": (
+                      EXPECTED_VERSION,
+                      actual_version,
+                  ),
+                  "upload_type": (
+                      EXPECTED_UPLOAD_TYPE,
+                      actual_upload_type,
+                  ),
+                  "publication_type": (
+                      EXPECTED_PUBLICATION_TYPE,
+                      actual_publication_type,
+                  ),
+                  "access_right": (
+                      EXPECTED_ACCESS_RIGHT,
+                      actual_access_right,
+                  ),
+              }
+
+              for field, (expected, actual) in expected_metadata.items():
+                  if actual != expected:
+                      fail(
+                          f"Zenodo {field} mismatch. "
+                          f"Expected {expected!r}; found {actual!r}."
+                      )
+
+              if len(files) != 1:
+                  fail(
+                      "WP-002 Zenodo deposition must contain exactly "
+                      f"one file; found {len(files)}."
+                  )
+
+              zenodo_file = files[0]
+              if not isinstance(zenodo_file, dict):
+                  fail("Zenodo file metadata is invalid.")
+
+              file_name = first_nonempty(
+                  zenodo_file.get("filename"),
+                  zenodo_file.get("key"),
+                  zenodo_file.get("name"),
+              )
+              file_md5 = normalize_checksum(
+                  zenodo_file.get("checksum")
+              )
+
+              print(f"Zenodo file name: {file_name}")
+              print(f"Zenodo file MD5: {file_md5}")
+
+              if file_name != EXPECTED_FILENAME:
+                  fail(
+                      "Unexpected WP-002 Zenodo filename. "
+                      f"Expected {EXPECTED_FILENAME!r}; "
+                      f"found {file_name!r}."
+                  )
+
+              if file_md5 != EXPECTED_FILE_MD5:
+                  fail(
+                      "Zenodo WP-002 PDF checksum mismatch. "
+                      f"Expected {EXPECTED_FILE_MD5}; "
+                      f"found {file_md5}."
+                  )
+
+              published = submitted and state == "done"
+              draft = (
+                  not submitted
+                  and state in {"unsubmitted", "inprogress"}
+              )
+
+              if not published and not draft:
+                  fail(
+                      "Unexpected Zenodo deposition state: "
+                      f"state={state!r}, submitted={submitted!r}."
+                  )
+
+              return published
+
+
+          def public_record_matches() -> bool:
+              url = f"{API_BASE}/records/{DEPOSITION_ID}"
+              status, payload, _ = request_json(
+                  url,
+                  authenticated=False,
+                  timeout=20,
+              )
+
+              print(f"Zenodo public-record check: HTTP {status}")
+
+              if status != 200 or not isinstance(payload, dict):
+                  return False
+
+              metadata = payload.get("metadata")
+              if not isinstance(metadata, dict):
+                  metadata = {}
+
+              title = normalize_text(
+                  first_nonempty(
+                      metadata.get("title"),
+                      payload.get("title"),
+                  )
+              )
+
+              pids = payload.get("pids")
+              pid_doi = ""
+              if isinstance(pids, dict):
+                  doi_object = pids.get("doi")
+                  if isinstance(doi_object, dict):
+                      pid_doi = str(
+                          doi_object.get("identifier") or ""
+                      )
+
+              doi = first_nonempty(
+                  payload.get("doi"),
+                  metadata.get("doi"),
+                  pid_doi,
+              )
+
+              return (
+                  doi == EXPECTED_DOI
+                  and title == normalize_text(EXPECTED_TITLE)
+              )
+
+
+          def deposition_reports_published() -> bool:
+              url = (
+                  f"{API_BASE}/deposit/depositions/{DEPOSITION_ID}"
+              )
+              status, payload, _ = request_json(
+                  url,
+                  timeout=30,
+              )
+
+              print(f"Zenodo deposition-state check: HTTP {status}")
+
+              if status != 200 or not isinstance(payload, dict):
+                  return False
+
+              state = str(payload.get("state") or "")
+              submitted_raw = payload.get("submitted", False)
+              submitted = (
+                  submitted_raw is True
+                  or str(submitted_raw).lower() == "true"
+              )
+
+              metadata = payload.get("metadata")
+              if not isinstance(metadata, dict):
+                  metadata = {}
+
+              prereserve = metadata.get("prereserve_doi")
+              if not isinstance(prereserve, dict):
+                  prereserve = {}
+
+              doi = first_nonempty(
+                  payload.get("doi"),
+                  prereserve.get("doi"),
+              )
+
+              return (
+                  state == "done"
+                  and submitted
+                  and doi == EXPECTED_DOI
+              )
+
+
+          def poll_until_published(
+              *,
+              attempts: int,
+              delay_seconds: int,
+          ) -> bool:
+              for attempt in range(1, attempts + 1):
+                  print(
+                      "Zenodo publication verification "
+                      f"{attempt}/{attempts}"
+                  )
+
+                  if public_record_matches():
+                      print(
+                          "Zenodo public record is available with "
+                          "the expected DOI and title."
+                      )
+                      return True
+
+                  if deposition_reports_published():
+                      print(
+                          "Zenodo deposition reports state=done "
+                          "and submitted=true."
+                      )
+                      return True
+
+                  if attempt < attempts:
+                      time.sleep(delay_seconds)
+
+              return False
+
+
+          def preflight() -> None:
+              if not TOKEN:
+                  fail("GitHub secret ZENODO_TOKEN is missing.")
+
+              record = fetch_deposition_with_retry()
+              published = validate_deposition(record)
+
+              # Before the approved publication time, a manual run must
+              # still find the Zenodo record as an unpublished draft.
+              if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
+                  target = datetime.fromisoformat(
+                      os.environ["TARGET_UTC"].replace("Z", "+00:00")
+                  )
+                  now = datetime.now(timezone.utc)
+
+                  if now < target and published:
+                      fail(
+                          "WP-002 Zenodo record is already public before "
+                          "the approved publication time."
+                      )
+
+              output_file = os.environ.get("GITHUB_OUTPUT")
+              if output_file:
+                  with open(output_file, "a", encoding="utf-8") as stream:
+                      stream.write(
+                          "published="
+                          f"{str(published).lower()}\n"
+                      )
+
+              if published:
+                  print(
+                      "WP-002 Zenodo record is already published and "
+                      "matches the approved identity."
+                  )
+              else:
+                  print(
+                      "WP-002 Zenodo draft, file, metadata, DOI, "
+                      "and API credentials verified."
+                  )
+
+
+          def publish() -> None:
+              if not TOKEN:
+                  fail("GitHub secret ZENODO_TOKEN is missing.")
+
+              record = fetch_deposition_with_retry()
+              already_published = validate_deposition(record)
+
+              if already_published:
+                  if poll_until_published(
+                      attempts=3,
+                      delay_seconds=10,
+                  ):
+                      print(
+                          "WP-002 was already published in Zenodo; "
+                          "no duplicate publish request was sent."
+                      )
+                      return
+
+                  fail(
+                      "Zenodo deposition says published, but the public "
+                      "state could not be independently confirmed."
+                  )
+
+              publish_url = (
+                  f"{API_BASE}/deposit/depositions/"
+                  f"{DEPOSITION_ID}/actions/publish"
+              )
+              post_attempts = 4
+
+              for attempt in range(1, post_attempts + 1):
+                  status, _, text = request_json(
+                      publish_url,
+                      method="POST",
+                      timeout=90,
+                  )
+
+                  print(
+                      "Zenodo publish request "
+                      f"{attempt}/{post_attempts}: HTTP {status}"
+                  )
+
+                  if status in {401, 403, 404}:
+                      fail(
+                          "Zenodo publish request returned a permanent "
+                          "authorization or record error.",
+                          text,
+                      )
+
+                  if status == 202:
+                      print(
+                          "Zenodo accepted the WP-002 publication request."
+                      )
+
+                      if poll_until_published(
+                          attempts=30,
+                          delay_seconds=10,
+                      ):
+                          print("WP-002 Zenodo publication verified.")
+                          return
+
+                      fail(
+                          "Zenodo accepted publication, but WP-002 was "
+                          "not confirmed as published within five minutes."
+                      )
+
+                  # A proxy timeout may happen after Zenodo accepted the POST.
+                  # Check state before sending another irreversible request.
+                  if poll_until_published(
+                      attempts=6,
+                      delay_seconds=10,
+                  ):
+                      print(
+                          "WP-002 Zenodo publication succeeded despite "
+                          "an ambiguous POST response."
+                      )
+                      return
+
+                  if not is_transient(status) and status != 409:
+                      fail(
+                          "Zenodo rejected the WP-002 publish request "
+                          f"with HTTP {status}.",
+                          text,
+                      )
+
+                  if attempt < post_attempts:
+                      wait_seconds = min(
+                          RETRY_DELAY_SECONDS * attempt,
+                          60,
+                      )
+                      print(
+                          "Zenodo remains temporarily unavailable. "
+                          f"Retrying publication in {wait_seconds} seconds."
+                      )
+                      time.sleep(wait_seconds)
+
+              fail(
+                  "WP-002 Zenodo publication was not confirmed after "
+                  "all retry attempts."
+              )
+
+
+          def main() -> None:
+              if len(sys.argv) != 2:
+                  fail(
+                      "Usage: zenodo_wp002.py <preflight|publish>"
+                  )
+
+              command = sys.argv[1]
+
+              if command == "preflight":
+                  preflight()
+              elif command == "publish":
+                  publish()
+              else:
+                  fail(f"Unknown command: {command}")
+
+
+          if __name__ == "__main__":
+              main()
+          PY
+
+          python3 -m py_compile /tmp/zenodo_wp002.py
+          echo "WP-002 Zenodo helper created and syntax-checked."
+
+      - name: Verify WP-002 Zenodo draft and credentials
+        id: zenodo_preflight
+        shell: bash
+        env:
+          ZENODO_TOKEN: ${{ secrets.ZENODO_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 /tmp/zenodo_wp002.py preflight
 
       - name: Stop after verification on manual or non-target runs
         if: steps.gate.outputs.publish != 'true'
         shell: bash
         run: |
-          echo "Verification successful."
-          echo "No public files were changed."
-          echo "Scheduled public release remains set for ${TARGET_DATE}."
+          {
+            echo "## XBX-RSP-WP-002 verification successful"
+            echo
+            echo "**GitHub staging release:** Verified"
+            echo "**GitHub staged HTML/PDF and SHA-256 hashes:** Verified"
+            echo "**Zenodo deposition ID:** 22171287"
+            echo "**Zenodo draft, metadata, file checksum, DOI, and credentials:** Verified"
+            echo "**Publication performed:** No"
+            echo
+            echo "WP-002 remains scheduled for September 15, 2026 at 8:37 AM EDT / 12:37 UTC."
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Publish WP-002 files into GitHub Pages source
+          echo "WP-002 verification successful."
+          echo "No GitHub Pages or Zenodo publication occurred."
+
+      - name: Prepare WP-002 files in GitHub Pages source
         if: steps.gate.outputs.publish == 'true'
         shell: bash
         run: |
+          set -euo pipefail
+
           mkdir -p "${DEST_DIR}"
 
-          cp /tmp/wp002-stage/index.html "${DEST_DIR}/index.html"
-          cp /tmp/wp002-stage/XBX-RSP-WP-002.pdf "${DEST_DIR}/XBX-RSP-WP-002.pdf"
+          cp "/tmp/wp002-stage/${HTML_NAME}" "${DEST_DIR}/${HTML_NAME}"
+          cp "/tmp/wp002-stage/${PDF_NAME}" "${DEST_DIR}/${PDF_NAME}"
 
-          echo "Files staged in ${DEST_DIR}."
+          echo "WP-002 files prepared in ${DEST_DIR}."
 
       - name: Add WP-002 to sitemap
         if: steps.gate.outputs.publish == 'true'
         shell: bash
         run: |
-          python <<'PY'
+          set -euo pipefail
+
+          python3 <<'PY'
           from pathlib import Path
 
           sitemap = Path("sitemap.xml")
           publication_url = (
-              "https://xbxbio.github.io/connected-cardiovascular-intelligence/"
+              "https://xbxbio.github.io/"
+              "connected-cardiovascular-intelligence/"
               "publications/XBX-RSP-WP-002/"
           )
 
@@ -220,87 +1136,127 @@ jobs:
           if sitemap.exists():
               text = sitemap.read_text(encoding="utf-8")
 
-              if publication_url not in text:
-                  if "</urlset>" not in text:
-                      raise SystemExit("Existing sitemap.xml has no closing </urlset> tag.")
-
-                  text = text.replace("</urlset>", entry + "</urlset>")
-                  sitemap.write_text(text, encoding="utf-8")
-                  print("WP-002 added to existing sitemap.")
+              if publication_url in text:
+                  print("WP-002 already exists in sitemap.")
               else:
-                  print("WP-002 is already present in sitemap; no change needed.")
+                  if "</urlset>" not in text:
+                      raise SystemExit(
+                          "Existing sitemap.xml has no closing </urlset> tag."
+                      )
+
+                  text = text.replace(
+                      "</urlset>",
+                      entry + "</urlset>",
+                  )
+                  sitemap.write_text(text, encoding="utf-8")
+                  print("WP-002 added to sitemap.")
+
           else:
               sitemap.write_text(
                   '<?xml version="1.0" encoding="UTF-8"?>\n'
-                  '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+                  '<urlset xmlns="http://www.sitemaps.org/'
+                  'schemas/sitemap/0.9">\n'
                   + entry
                   + '</urlset>\n',
                   encoding="utf-8",
               )
-              print("Created sitemap.xml with WP-002.")
+              print("Created sitemap.xml containing WP-002.")
           PY
 
-      - name: Commit public publication to main
+      - name: Publish and verify WP-002 in Zenodo
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        env:
+          ZENODO_TOKEN: ${{ secrets.ZENODO_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 /tmp/zenodo_wp002.py publish
+
+      - name: Commit public WP-002 files to main
         id: commit
         if: steps.gate.outputs.publish == 'true'
         shell: bash
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          set -euo pipefail
 
-          git add "${DEST_DIR}/index.html"
-          git add "${DEST_DIR}/XBX-RSP-WP-002.pdf"
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add "${DEST_DIR}/${HTML_NAME}"
+          git add "${DEST_DIR}/${PDF_NAME}"
           git add sitemap.xml
 
           if git diff --cached --quiet; then
-            echo "WP-002 is already published; no new commit required."
+            echo "WP-002 public files are already present."
           else
             git commit -m "Publish XBX-RSP-WP-002"
-            git push origin main
+            git fetch origin main
+            git rebase origin/main
+            git push origin HEAD:main
           fi
 
-          PUBLISHED_SHA="$(git rev-parse HEAD)"
-          echo "published_sha=${PUBLISHED_SHA}" >> "$GITHUB_OUTPUT"
-          echo "Published main-branch revision: ${PUBLISHED_SHA}"
+          published_sha="$(git rev-parse HEAD)"
+          echo "published_sha=${published_sha}" >> "$GITHUB_OUTPUT"
+          echo "Published main-branch revision: ${published_sha}"
 
       - name: Request GitHub Pages build
         if: steps.gate.outputs.publish == 'true'
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          gh api \
-            --method POST \
-            -H "X-GitHub-Api-Version: 2026-03-10" \
-            "/repos/${GITHUB_REPOSITORY}/pages/builds"
+          set -euo pipefail
 
-          echo "GitHub Pages build requested from the latest main-branch revision."
+          set +e
+          request_output="$(
+            gh api \
+              --method POST \
+              "repos/${{ github.repository }}/pages/builds" \
+              2>&1
+          )"
+          request_exit=$?
+          set -e
+
+          if [[ "${request_exit}" -eq 0 ]]; then
+            echo "GitHub Pages build requested."
+          else
+            echo "GitHub Pages build request returned a nonzero status."
+            echo "The workflow will inspect the latest build before failing."
+            echo "${request_output}"
+          fi
 
       - name: Wait for GitHub Pages build
         if: steps.gate.outputs.publish == 'true'
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           TARGET_SHA: ${{ steps.commit.outputs.published_sha }}
         run: |
+          set -euo pipefail
+
           for attempt in $(seq 1 60); do
-            BUILD_JSON="$(
+            build_json="$(
               gh api \
-                -H "X-GitHub-Api-Version: 2026-03-10" \
-                "/repos/${GITHUB_REPOSITORY}/pages/builds/latest"
+                "repos/${{ github.repository }}/pages/builds/latest"
             )"
 
-            STATUS="$(jq -r '.status' <<< "${BUILD_JSON}")"
-            BUILD_SHA="$(jq -r '.commit' <<< "${BUILD_JSON}")"
+            status="$(jq -r '.status // empty' <<<"${build_json}")"
+            build_sha="$(jq -r '.commit // empty' <<<"${build_json}")"
 
-            echo "Pages build status (${attempt}/60): ${STATUS}; commit: ${BUILD_SHA}"
+            echo "Pages build ${attempt}/60:"
+            echo "Status: ${status}"
+            echo "Commit: ${build_sha}"
+            echo "Target: ${TARGET_SHA}"
 
-            if [[ "${BUILD_SHA}" == "${TARGET_SHA}" && "${STATUS}" == "built" ]]; then
-              echo "GitHub Pages build completed successfully for ${TARGET_SHA}."
+            if [[ "${build_sha}" == "${TARGET_SHA}" \
+                  && "${status}" == "built" ]]; then
+              echo "GitHub Pages build completed successfully."
               exit 0
             fi
 
-            if [[ "${BUILD_SHA}" == "${TARGET_SHA}" && "${STATUS}" == "errored" ]]; then
+            if [[ "${build_sha}" == "${TARGET_SHA}" \
+                  && "${status}" == "errored" ]]; then
               echo "::error::GitHub Pages build failed for ${TARGET_SHA}."
               exit 1
             fi
@@ -318,13 +1274,18 @@ jobs:
           {
             echo "## XBX-RSP-WP-002 published"
             echo
+            echo "**Document:** Clinical AI Governance & Defensible Information States"
             echo "**Publication date:** September 15, 2026"
-            echo
+            echo "**Publication time:** 8:37 AM EDT / 12:37 UTC"
+            echo "**Version:** 0.2-P"
+            echo "**DOI:** 10.5281/zenodo.22171287"
+            echo "**Zenodo deposition ID:** 22171287"
+            echo "**Zenodo publication:** Verified"
             echo "**Public page:**"
             echo "https://xbxbio.github.io/connected-cardiovascular-intelligence/publications/XBX-RSP-WP-002/"
-            echo
             echo "**Public PDF:**"
             echo "https://xbxbio.github.io/connected-cardiovascular-intelligence/publications/XBX-RSP-WP-002/XBX-RSP-WP-002.pdf"
             echo
+            echo "WP-002 GitHub Pages and Zenodo publication completed."
             echo "Google Scholar indexing is crawler-controlled and is not guaranteed to occur immediately."
           } >> "$GITHUB_STEP_SUMMARY"
