@@ -15,7 +15,6 @@ env:
   TARGET_UTC: "2026-09-17T13:00:00Z"
 
   DEST_DIR: "publications/XBX-RSP-RF-001"
-
   PDF_NAME: "XBX-RSP-RF-001_xBxBio_Regulatory-by-Design_Framework_Public_Governance_Summary_v1.0.pdf"
   DOCX_NAME: "XBX-RSP-RF-001_xBxBio_Regulatory-by-Design_Framework_Public_Governance_Summary_v1.0.docx"
 
@@ -23,6 +22,10 @@ env:
   EXPECTED_DOCX_SHA256: "76955034fa3133c41e26c7d232ed989f015482f43d927d2cfda1cb7be219fd07"
 
   EXPECTED_RELEASE_TITLE: "XBX-RSP-RF-001 — xBxBio Regulatory-by-Design Framework for Connected Cardiovascular Intelligence"
+
+  ZENODO_DEPOSITION_ID: "22257444"
+  EXPECTED_ZENODO_DOI: "10.5281/zenodo.22257444"
+  EXPECTED_ZENODO_TITLE: "xBxBio Regulatory-by-Design Framework for Connected Cardiovascular Intelligence"
 
 jobs:
   publish:
@@ -235,14 +238,103 @@ jobs:
 
           echo "RF-001 staged-file integrity verified."
 
+      - name: Verify RF-001 Zenodo draft and credentials
+        shell: bash
+        env:
+          ZENODO_TOKEN: ${{ secrets.ZENODO_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${ZENODO_TOKEN:-}" ]]; then
+            echo "::error::GitHub secret ZENODO_TOKEN is missing."
+            exit 1
+          fi
+
+          response_file="$(mktemp)"
+
+          http_status="$(
+            curl \
+              --silent \
+              --show-error \
+              --connect-timeout 30 \
+              --max-time 120 \
+              --output "${response_file}" \
+              --write-out "%{http_code}" \
+              --header "Authorization: Bearer ${ZENODO_TOKEN}" \
+              "https://zenodo.org/api/deposit/depositions/${ZENODO_DEPOSITION_ID}"
+          )"
+
+          echo "Zenodo preflight HTTP status: ${http_status}"
+
+          if [[ "${http_status}" != "200" ]]; then
+            echo "::error::Unable to retrieve the RF-001 Zenodo draft."
+            cat "${response_file}"
+            exit 1
+          fi
+
+          actual_id="$(jq -r '.id // empty | tostring' "${response_file}")"
+          actual_title="$(jq -r '.metadata.title // .title // empty' "${response_file}")"
+          actual_doi="$(
+            jq -r \
+              '.doi // .metadata.prereserve_doi.doi // empty' \
+              "${response_file}"
+          )"
+          actual_state="$(jq -r '.state // empty' "${response_file}")"
+          actual_submitted="$(jq -r '.submitted // false' "${response_file}")"
+
+          echo "Zenodo deposition ID: ${actual_id}"
+          echo "Zenodo title: ${actual_title}"
+          echo "Zenodo DOI: ${actual_doi}"
+          echo "Zenodo state: ${actual_state}"
+          echo "Zenodo submitted: ${actual_submitted}"
+
+          if [[ "${actual_id}" != "${ZENODO_DEPOSITION_ID}" ]]; then
+            echo "::error::Zenodo deposition ID mismatch."
+            echo "Expected: ${ZENODO_DEPOSITION_ID}"
+            echo "Actual:   ${actual_id}"
+            exit 1
+          fi
+
+          if [[ "${actual_title}" != "${EXPECTED_ZENODO_TITLE}" ]]; then
+            echo "::error::Zenodo title mismatch."
+            echo "Expected: ${EXPECTED_ZENODO_TITLE}"
+            echo "Actual:   ${actual_title}"
+            exit 1
+          fi
+
+          if [[ "${actual_doi}" != "${EXPECTED_ZENODO_DOI}" ]]; then
+            echo "::error::Zenodo DOI mismatch."
+            echo "Expected: ${EXPECTED_ZENODO_DOI}"
+            echo "Actual:   ${actual_doi}"
+            exit 1
+          fi
+
+          if [[ "${actual_submitted}" != "false" ]]; then
+            echo "::error::RF-001 Zenodo record is not an unpublished draft."
+            exit 1
+          fi
+
+          if [[ "${actual_state}" != "unsubmitted" ]]; then
+            echo "::error::Unexpected Zenodo draft state: ${actual_state}"
+            exit 1
+          fi
+
+          echo "RF-001 Zenodo draft and API credentials verified."
+
       - name: Stop after verification on manual or non-target runs
         if: steps.gate.outputs.publish != 'true'
         shell: bash
         run: |
           echo
           echo "RF-001 verification successful."
+          echo "GitHub staging verified."
+          echo "Zenodo draft verified."
+          echo "ZENODO_TOKEN authentication verified."
+          echo
           echo "No public files were changed."
           echo "No GitHub release was published."
+          echo "No Zenodo record was published."
+          echo
           echo "Scheduled release remains:"
           echo "September 17, 2026 at 9:00 AM EDT / 13:00 UTC."
 
@@ -385,6 +477,7 @@ jobs:
 
               if publication_url in text:
                   print("RF-001 already exists in sitemap.")
+
               else:
                   if "</urlset>" not in text:
                       raise SystemExit(
@@ -432,6 +525,7 @@ jobs:
 
           if git diff --cached --quiet; then
             echo "RF-001 public files are already present."
+
           else
             git commit -m "Publish XBX-RSP-RF-001"
             git push origin main
@@ -454,6 +548,162 @@ jobs:
 
           echo "RF-001 GitHub release published."
 
+      - name: Publish RF-001 Zenodo draft
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        env:
+          ZENODO_TOKEN: ${{ secrets.ZENODO_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${ZENODO_TOKEN:-}" ]]; then
+            echo "::error::GitHub secret ZENODO_TOKEN is missing."
+            exit 1
+          fi
+
+          response_file="$(mktemp)"
+
+          echo "Publishing Zenodo deposition ${ZENODO_DEPOSITION_ID}..."
+
+          set +e
+
+          http_status="$(
+            curl \
+              --silent \
+              --show-error \
+              --connect-timeout 30 \
+              --max-time 120 \
+              --output "${response_file}" \
+              --write-out "%{http_code}" \
+              --request POST \
+              --header "Authorization: Bearer ${ZENODO_TOKEN}" \
+              "https://zenodo.org/api/deposit/depositions/${ZENODO_DEPOSITION_ID}/actions/publish"
+          )"
+
+          curl_exit=$?
+
+          set -e
+
+          echo "Zenodo publish HTTP status: ${http_status}"
+          echo "Zenodo curl exit status: ${curl_exit}"
+
+          if [[ "${curl_exit}" -eq 0 && "${http_status}" == "202" ]]; then
+            echo "Zenodo accepted RF-001 publication."
+
+          else
+            echo "Zenodo publish request did not return a clean 202 response."
+            echo "Checking the deposition before declaring failure."
+
+            check_file="$(mktemp)"
+
+            set +e
+
+            check_status="$(
+              curl \
+                --silent \
+                --show-error \
+                --connect-timeout 30 \
+                --max-time 120 \
+                --output "${check_file}" \
+                --write-out "%{http_code}" \
+                --header "Authorization: Bearer ${ZENODO_TOKEN}" \
+                "https://zenodo.org/api/deposit/depositions/${ZENODO_DEPOSITION_ID}"
+            )"
+
+            check_exit=$?
+
+            set -e
+
+            if [[ "${check_exit}" -eq 0 && "${check_status}" == "200" ]]; then
+              submitted="$(jq -r '.submitted // false' "${check_file}")"
+              state="$(jq -r '.state // empty' "${check_file}")"
+
+              if [[ "${submitted}" == "true" && "${state}" == "done" ]]; then
+                echo "Zenodo publication succeeded despite the ambiguous POST response."
+                exit 0
+              fi
+            fi
+
+            echo "::error::Zenodo RF-001 publication was not confirmed."
+
+            if [[ -s "${response_file}" ]]; then
+              cat "${response_file}"
+            fi
+
+            exit 1
+          fi
+
+      - name: Verify RF-001 Zenodo publication
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        env:
+          ZENODO_TOKEN: ${{ secrets.ZENODO_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          verified="false"
+
+          for attempt in $(seq 1 30); do
+
+            response_file="$(mktemp)"
+
+            set +e
+
+            http_status="$(
+              curl \
+                --silent \
+                --show-error \
+                --connect-timeout 30 \
+                --max-time 120 \
+                --output "${response_file}" \
+                --write-out "%{http_code}" \
+                --header "Authorization: Bearer ${ZENODO_TOKEN}" \
+                "https://zenodo.org/api/deposit/depositions/${ZENODO_DEPOSITION_ID}"
+            )"
+
+            curl_exit=$?
+
+            set -e
+
+            echo "Zenodo verification attempt ${attempt}/30:"
+            echo "HTTP status: ${http_status}"
+            echo "curl exit status: ${curl_exit}"
+
+            if [[ "${curl_exit}" -eq 0 && "${http_status}" == "200" ]]; then
+
+              actual_id="$(jq -r '.id // empty | tostring' "${response_file}")"
+              actual_doi="$(
+                jq -r \
+                  '.doi // .metadata.prereserve_doi.doi // empty' \
+                  "${response_file}"
+              )"
+              actual_state="$(jq -r '.state // empty' "${response_file}")"
+              actual_submitted="$(jq -r '.submitted // false' "${response_file}")"
+
+              echo "Zenodo deposition ID: ${actual_id}"
+              echo "Zenodo DOI: ${actual_doi}"
+              echo "Zenodo state: ${actual_state}"
+              echo "Zenodo submitted: ${actual_submitted}"
+
+              if [[ "${actual_id}" == "${ZENODO_DEPOSITION_ID}" \
+                    && "${actual_doi}" == "${EXPECTED_ZENODO_DOI}" \
+                    && "${actual_state}" == "done" \
+                    && "${actual_submitted}" == "true" ]]; then
+
+                verified="true"
+                echo "RF-001 Zenodo publication verified."
+                break
+              fi
+            fi
+
+            sleep 10
+          done
+
+          if [[ "${verified}" != "true" ]]; then
+            echo "::error::RF-001 Zenodo publication could not be verified within 5 minutes."
+            exit 1
+          fi
+
       - name: Publication summary
         if: steps.gate.outputs.publish == 'true'
         shell: bash
@@ -471,10 +721,14 @@ jobs:
             echo
             echo "**DOI:** 10.5281/zenodo.22257444"
             echo
+            echo "**Zenodo deposition ID:** 22257444"
+            echo
+            echo "**Zenodo publication:** Verified"
+            echo
             echo "**Public page:**"
             echo "https://xbxbio.github.io/connected-cardiovascular-intelligence/publications/XBX-RSP-RF-001/"
             echo
             echo "**GitHub release tag:** XBX-RSP-RF-001-v1.0"
             echo
-            echo "RF-001 publication completed."
+            echo "RF-001 GitHub and Zenodo publication completed."
           } >> "$GITHUB_STEP_SUMMARY"
